@@ -4,3 +4,15 @@ class LLMTimeoutError(Exception):
 
 class LLMProviderError(Exception):
     """The LLM backend rejected the request."""
+
+
+class SuggestionProviderError(Exception):
+    """Provider failed; messages exclude response bodies and credentials."""
+
+
+class SuggestionProviderUnavailable(SuggestionProviderError):
+    """A transport failure or retryable HTTP response."""
+
+
+class StaleSuggestions(SuggestionProviderError):
+    """Document state changed while suggestions were being generated."""
