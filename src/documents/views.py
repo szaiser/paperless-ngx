@@ -1,4 +1,3 @@
-import itertools
 import logging
 import os
 import platform
@@ -146,10 +145,7 @@ from documents.filters import TagFilterSet
 from documents.filters import TitleContentFilter
 from documents.mail import EmailAttachment
 from documents.mail import send_email
-from documents.matching import match_correspondents
-from documents.matching import match_document_types
-from documents.matching import match_storage_paths
-from documents.matching import match_tags
+from documents.matching import get_classic_document_suggestions
 from documents.models import Correspondent
 from documents.models import CustomField
 from documents.models import CustomFieldInstance
@@ -183,7 +179,6 @@ from documents.permissions import permitted_document_ids
 from documents.permissions import permitted_object_ids
 from documents.permissions import set_permissions_for_objects
 from documents.permissions import user_is_unrestricted
-from documents.plugins.date_parsing import get_date_parser
 from documents.schema import generate_object_with_permissions_schema
 from documents.search import SearchHit
 from documents.serialisers import AcknowledgeTasksViewSerializer
@@ -1595,33 +1590,7 @@ class DocumentViewSet(
 
         classifier = load_classifier()
 
-        dates = []
-        if settings.NUMBER_OF_SUGGESTED_DATES > 0:
-            with get_date_parser() as date_parser:
-                gen = date_parser.parse(doc.filename, doc.content)
-                dates = sorted(
-                    {
-                        i
-                        for i in itertools.islice(
-                            gen,
-                            settings.NUMBER_OF_SUGGESTED_DATES,
-                        )
-                    },
-                )
-
-        resp_data = {
-            "correspondents": [
-                c.id for c in match_correspondents(doc, classifier, request.user)
-            ],
-            "tags": [t.id for t in match_tags(doc, classifier, request.user)],
-            "document_types": [
-                dt.id for dt in match_document_types(doc, classifier, request.user)
-            ],
-            "storage_paths": [
-                dt.id for dt in match_storage_paths(doc, classifier, request.user)
-            ],
-            "dates": [date.strftime("%Y-%m-%d") for date in dates if date is not None],
-        }
+        resp_data = get_classic_document_suggestions(doc, classifier, request.user)
 
         # Cache the suggestions and the classifier hash for later
         set_suggestions_cache(doc.pk, resp_data, classifier)
