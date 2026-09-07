@@ -12,6 +12,7 @@ from django.test import SimpleTestCase
 from django.test import TestCase
 from django.test import override_settings
 
+from documents import tasks
 from documents.models import CustomField
 from documents.models import CustomFieldInstance
 from documents.models import Document
@@ -361,6 +362,79 @@ class TestSuggestionProvider(DirectoriesMixin, TestCase):
         )
         self.assertEqual(self.post.call_args.args[0]["requester_id"], self.user.pk)
         self.llm.assert_not_called()
+
+    def test_background_apply_notifies_separately_without_updated_workflow_loop(
+        self,
+    ) -> None:
+        action = WorkflowAction.objects.create(
+            type=WorkflowAction.WorkflowActionType.APPLY_AI_SUGGESTIONS,
+            ai_suggestion_fields=[WorkflowAction.AISuggestionField.TITLE],
+            ai_overwrite_existing=True,
+        )
+        with (
+            patch("documents.tasks.notify_suggestions_applied.delay") as notify,
+            patch("documents.tasks.index_document.delay"),
+            patch("documents.tasks.document_updated") as updated,
+        ):
+            tasks.apply_ai_suggestions.apply(
+                args=(action.pk, self.document.pk),
+                task_id="synthetic-apply-task",
+                throw=True,
+            )
+        event = notify.call_args.args[0]
+        self.assertEqual(event["event_id"], "synthetic-apply-task")
+        self.assertEqual(event["document_id"], self.document.pk)
+        self.assertEqual(event["changed_fields"], ["title"])
+        self.assertNotIn("content", event)
+        updated.send.assert_not_called()
+
+    def test_notification_only_acknowledges_without_regenerating(self) -> None:
+        event = {"event_id": "synthetic-event"}
+        self.post.side_effect = lambda value: {"event_id": value["event_id"]}
+        tasks.notify_suggestions_applied(event)
+        tasks.notify_suggestions_applied(event)
+        self.assertEqual(self.post.call_args.args[0], event)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.title, "Saved title")
+        self.llm.assert_not_called()
+
+    def test_notification_retries_reuse_event_without_regenerating(self) -> None:
+        event = {"event_id": "synthetic-event"}
+        self.post.side_effect = [
+            SuggestionProviderUnavailable("Synthetic outage"),
+            {"event_id": event["event_id"]},
+        ]
+        result = tasks.notify_suggestions_applied.apply(args=(event,))
+        self.assertTrue(result.successful())
+        self.assertEqual(self.post.call_count, 2)
+        self.assertTrue(all(call.args == (event,) for call in self.post.call_args_list))
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.title, "Saved title")
+        self.llm.assert_not_called()
+
+    def test_notification_rejects_mismatched_acknowledgement_without_retry(
+        self,
+    ) -> None:
+        self.post.return_value = {"event_id": "other-event"}
+        self.post.side_effect = None
+        result = tasks.notify_suggestions_applied.apply(
+            args=({"event_id": "synthetic-event"},),
+        )
+        self.assertIsInstance(result.result, SuggestionProviderError)
+        self.post.assert_called_once()
+
+    def test_notification_stops_after_retry_limit(self) -> None:
+        self.post.side_effect = SuggestionProviderUnavailable("Synthetic outage")
+        result = tasks.notify_suggestions_applied.apply(
+            args=({"event_id": "synthetic-event"},),
+        )
+        self.assertIsInstance(result.result, SuggestionProviderUnavailable)
+        self.assertEqual(self.post.call_count, 6)
+
+    @override_settings(AI_SUGGESTIONS_ENDPOINT="")
+    def test_disabling_provider_skips_queued_notification(self) -> None:
+        tasks.notify_suggestions_applied({"event_id": "synthetic-event"})
+        self.post.assert_not_called()
 
 
 @override_settings(
