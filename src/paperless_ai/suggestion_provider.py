@@ -1,11 +1,8 @@
 """Document-aware HTTP boundary shared by native suggestions and workflows."""
 
 import hashlib
-import itertools
 import json
 import socket
-import uuid
-from datetime import date
 from typing import Any
 from typing import Final
 
@@ -13,17 +10,10 @@ import httpx
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.serializers.json import DjangoJSONEncoder
-from pydantic import BaseModel
-from pydantic import ConfigDict
-from pydantic import Field
 from pydantic import ValidationError
-from pydantic import field_validator
 
 from documents.classifier import load_classifier
-from documents.matching import match_correspondents
-from documents.matching import match_document_types
-from documents.matching import match_storage_paths
-from documents.matching import match_tags
+from documents.matching import get_classic_document_suggestions
 from documents.models import Correspondent
 from documents.models import CustomFieldInstance
 from documents.models import Document
@@ -31,13 +21,10 @@ from documents.models import DocumentType
 from documents.models import StoragePath
 from documents.models import Tag
 from documents.permissions import restrict_queryset_to_visible
-from documents.plugins.date_parsing import get_date_parser
 from documents.versioning import get_latest_version_for_root
 from paperless.network import create_pinned_httpx_client
-from paperless_ai.base_model import MAX_DATES
-from paperless_ai.base_model import MAX_NEW_NAMES
-from paperless_ai.base_model import MAX_TITLE_LENGTH
 from paperless_ai.base_model import ClassificationSuggestions
+from paperless_ai.base_model import validate_classification_suggestions
 from paperless_ai.db import db_connection_released
 from paperless_ai.exceptions import StaleSuggestions
 from paperless_ai.exceptions import SuggestionProviderError
@@ -47,57 +34,11 @@ PROTOCOL_VERSION: Final = 1
 MAX_RESPONSE_BYTES: Final = 1_048_576
 
 
-class Choice(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    existing_ids: list[int] = Field(default_factory=list, max_length=100)
-    new_names: list[str] = Field(default_factory=list, max_length=MAX_NEW_NAMES)
-
-    @field_validator("existing_ids")
-    @classmethod
-    def positive_ids(cls, values: list[int]) -> list[int]:
-        if any(value < 1 for value in values):
-            raise ValueError("IDs must be positive")
-        return list(dict.fromkeys(values))
-
-    @field_validator("new_names")
-    @classmethod
-    def valid_names(cls, values: list[str]) -> list[str]:
-        if any(not value.strip() or len(value) > MAX_TITLE_LENGTH for value in values):
-            raise ValueError("Names must contain 1 to 128 characters")
-        return list(dict.fromkeys(values))
-
-
-class Suggestions(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    title: str = Field(max_length=MAX_TITLE_LENGTH)
-    tags: Choice
-    correspondents: Choice
-    document_types: Choice
-    storage_paths: Choice
-    dates: list[str] = Field(max_length=MAX_DATES)
-
-    @field_validator("dates")
-    @classmethod
-    def valid_dates(cls, values: list[str]) -> list[str]:
-        for value in values:
-            if date.fromisoformat(value).isoformat() != value:
-                raise ValueError("Dates must use YYYY-MM-DD")
-        return values
-
-
-class ProviderResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    protocol_version: int = Field(ge=PROTOCOL_VERSION, le=PROTOCOL_VERSION)
-    request_id: str
-    context_id: str
-    suggestions: Suggestions
-
-
 TAXONOMY = {
-    "tags": (Tag, "view_tag", match_tags),
-    "correspondents": (Correspondent, "view_correspondent", match_correspondents),
-    "document_types": (DocumentType, "view_documenttype", match_document_types),
-    "storage_paths": (StoragePath, "view_storagepath", match_storage_paths),
+    "tags": (Tag, "view_tag"),
+    "correspondents": (Correspondent, "view_correspondent"),
+    "document_types": (DocumentType, "view_documenttype"),
+    "storage_paths": (StoragePath, "view_storagepath"),
 }
 
 
@@ -219,16 +160,19 @@ def get_provider_classification(
     output_language: str | None = None,
 ) -> ClassificationSuggestions:
     try:
-        document.refresh_from_db()
+        document.refresh_from_db(from_queryset=Document.objects.all())
     except Document.DoesNotExist:
         raise StaleSuggestions("Document no longer exists") from None
-    if document.is_deleted:
-        raise StaleSuggestions("Document no longer exists")
     snapshot = document_snapshot(document)
     taxonomy = {}
-    classic: dict[str, list[int] | list[str]] = {}
-    classifier = load_classifier()
-    for key, (model, permission, match) in TAXONOMY.items():
+    classic = get_classic_document_suggestions(
+        document,
+        load_classifier(),
+        user,
+        content=snapshot["content"],
+        filename=snapshot["content_version"]["original_filename"] or "",
+    )
+    for key, (model, permission) in TAXONOMY.items():
         taxonomy[key] = list(
             restrict_queryset_to_visible(
                 model.objects.all(),
@@ -239,26 +183,7 @@ def get_provider_classification(
             .values("id", "name"),
         )
         allowed = {item["id"] for item in taxonomy[key]}
-        classic[key] = [
-            item.pk for item in match(document, classifier, user) if item.pk in allowed
-        ]
-    classic["dates"] = []
-    if settings.NUMBER_OF_SUGGESTED_DATES > 0:
-        with get_date_parser() as parser:
-            dates = parser.parse(
-                snapshot["content_version"]["original_filename"] or "",
-                snapshot["content"],
-            )
-            classic["dates"] = sorted(
-                {
-                    value.strftime("%Y-%m-%d")
-                    for value in itertools.islice(
-                        dates,
-                        settings.NUMBER_OF_SUGGESTED_DATES,
-                    )
-                    if value is not None
-                },
-            )
+        classic[key] = [pk for pk in classic[key] if pk in allowed]
     context = {
         "document": snapshot,
         "requester_id": user.pk if user else None,
@@ -268,55 +193,27 @@ def get_provider_classification(
     }
     payload = {
         "protocol_version": PROTOCOL_VERSION,
-        "event": "suggestions.requested",
-        "request_id": str(uuid.uuid4()),
         "context_id": fingerprint(context),
         **context,
     }
     try:
-        response = ProviderResponse.model_validate(post_provider(payload))
+        suggestions = validate_classification_suggestions(post_provider(payload))
     except ValidationError:
         raise SuggestionProviderError(
             "Suggestion provider returned invalid suggestions",
         ) from None
-    if (
-        response.request_id != payload["request_id"]
-        or response.context_id != payload["context_id"]
-    ):
-        raise SuggestionProviderError(
-            "Suggestion provider response does not match the request",
-        )
     try:
         current = document_snapshot(Document.objects.get(pk=document.pk))
     except Document.DoesNotExist:
         raise StaleSuggestions("Document no longer exists") from None
-    if fingerprint(current) != fingerprint(snapshot):
+    if current != snapshot:
         raise StaleSuggestions(
             "Document changed during suggestion generation; request suggestions again",
         )
-    for key in TAXONOMY:
+    for key in ("tags", "correspondents", "document_types", "storage_paths"):
         allowed = {item["id"] for item in taxonomy[key]}
-        if not set(getattr(response.suggestions, key).existing_ids) <= allowed:
+        if not set(suggestions[key]["existing_ids"]) <= allowed:
             raise SuggestionProviderError(
                 "Suggestion provider returned an ID outside the permitted taxonomy",
             )
-    return ClassificationSuggestions(**response.suggestions.model_dump())
-
-
-def applied_event(
-    document_id: int,
-    action_id: int,
-    changed_fields: list[str],
-    task_id: str | None,
-) -> dict[str, Any]:
-    snapshot = document_snapshot(Document.objects.get(pk=document_id))
-    return {
-        "protocol_version": PROTOCOL_VERSION,
-        "event": "suggestions.applied",
-        "event_id": task_id or str(uuid.uuid4()),
-        "document_id": document_id,
-        "content_version_id": snapshot["content_version"]["id"],
-        "document_state_id": fingerprint(snapshot),
-        "workflow_action_id": action_id,
-        "changed_fields": changed_fields,
-    }
+    return suggestions

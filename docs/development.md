@@ -390,9 +390,7 @@ Paperless POSTs the following JSON fields to the configured endpoint:
 | Field                 | Meaning                                                                                          |
 | --------------------- | ------------------------------------------------------------------------------------------------ |
 | `protocol_version`    | Integer `1`.                                                                                     |
-| `event`               | `suggestions.requested`.                                                                         |
-| `request_id`          | Unique request identifier; echo it in the response.                                              |
-| `context_id`          | Opaque context fingerprint; echo it unchanged.                                                   |
+| `context_id`          | Opaque fingerprint for identifying identical input, e.g. for provider-side caching.              |
 | `requester_id`        | Interactive user's ID; workflows use the document owner's ID, or `null` for an unowned document. |
 | `output_language`     | Requested output language, or `null`.                                                            |
 | `document`            | Saved metadata, tags, typed custom fields, complete text and its source version.                 |
@@ -410,41 +408,37 @@ Metadata includes `root_document_id`, `owner_id`, `modified`, `title`, `created`
 and `custom_fields` (`field`, `name`, `data_type`, `value`). Relation values are
 IDs. An OCR text change changes the context even when the file checksum is unchanged.
 
-Return HTTP 200 with JSON:
+Return HTTP 200 with Paperless's internal suggestion format as JSON:
 
 ```json
 {
-  "protocol_version": 1,
-  "request_id": "echo the request value",
-  "context_id": "echo the request value",
-  "suggestions": {
-    "title": "Suggested title",
-    "tags": { "existing_ids": [], "new_names": [] },
-    "correspondents": { "existing_ids": [], "new_names": [] },
-    "document_types": { "existing_ids": [], "new_names": [] },
-    "storage_paths": { "existing_ids": [], "new_names": [] },
-    "dates": ["2026-01-02"]
-  }
+  "title": "Suggested title",
+  "tags": { "existing_ids": [], "new_names": [] },
+  "correspondents": { "existing_ids": [], "new_names": [] },
+  "document_types": { "existing_ids": [], "new_names": [] },
+  "storage_paths": { "existing_ids": [], "new_names": [] },
+  "dates": ["2026-01-02"]
 }
 ```
 
 All suggestion fields are required. IDs must come from the supplied taxonomy.
 Title and names are limited to 128 characters; each category permits up to 100
 IDs and eight new names; at most three valid ISO dates are accepted. Responses
-are capped at 1 MiB. Unknown fields, incorrect types and mismatched request or
-context IDs are rejected. To select existing taxonomy only, return empty
+are capped at 1 MiB. Unknown fields and incorrect types are rejected.
+To select existing taxonomy only, return empty
 `new_names`. Return empty choices for fields that should remain unchanged.
 
 ### Freshness and failures
 
 Request handling must not modify the document. Paperless re-reads saved state
 after receiving the response and rejects suggestions if the version, text,
-metadata, tags or custom fields changed. Perform enrichment after a save or an
-application notification instead.
+metadata, tags or custom fields changed. Use a
+[Document Updated workflow](usage.md#workflow-trigger-types) for enrichment after
+a user saves. Automatic AI application does not trigger Document Updated.
 
 External suggestions bypass Paperless's LLM cache. A provider may reuse results
-using the context fingerprint **and its own rules/configuration/model revision**,
-while echoing each incoming request ID. The editor receives HTTP 409 for stale
+using the context fingerprint **and its own rules/configuration/model revision**.
+The editor receives HTTP 409 for stale
 state, 503 for transient provider failures and 502 for invalid responses.
 Failed external requests do not fall back to built-in classification. The
 workflow task retries transient failures and stale inputs up to three times;
@@ -454,23 +448,6 @@ The editor displays translated failure messages. Provider diagnostics, including
 HTTP status codes, are recorded in the Paperless server logs; these messages omit
 endpoint credentials and response bodies. Documents moved to the trash are
 rejected before contacting the provider or when checking the returned result.
-
-### Automatic-application notification
-
-After a workflow applies changes, a separate Celery task POSTs
-`event: suggestions.applied` to the same endpoint. Its fields are
-`protocol_version`, `event_id`, `document_id`, `content_version_id`,
-`document_state_id`, `workflow_action_id` and `changed_fields`; document text is
-not repeated. Acknowledge with HTTP 200 and `{"event_id": "the received event ID"}`.
-
-Deduplicate notifications by `event_id` and re-read current Paperless state
-before enrichment. Retries retain the event ID and do not repeat classification
-or metadata application. Transient delivery failures retry up to five times;
-exhausted retries remain visible in task-worker logs. Delivery depends on the
-existing task broker and is not transactional with the metadata update.
-
-User saves use Document Updated workflows. Automatic AI application uses this
-dedicated notification to avoid an Updated → Apply AI Suggestions loop.
 
 ## Extending Paperless-ngx
 

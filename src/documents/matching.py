@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import itertools
 import logging
 import re
 from fnmatch import fnmatch
 from fnmatch import translate as fnmatch_translate
 from typing import TYPE_CHECKING
 
+from django.conf import settings
 from rest_framework import serializers
 
 from documents.data_models import ConsumableDocument
@@ -20,6 +22,7 @@ from documents.models import Tag
 from documents.models import Workflow
 from documents.models import WorkflowTrigger
 from documents.permissions import permitted_object_ids
+from documents.plugins.date_parsing import get_date_parser
 from documents.regex import safe_regex_search
 
 if TYPE_CHECKING:
@@ -172,6 +175,46 @@ def match_storage_paths(
             storage_paths,
         ),
     )
+
+
+def get_classic_document_suggestions(
+    document: Document,
+    classifier: DocumentClassifier | None,
+    user=None,
+    *,
+    content: str | None = None,
+    filename: str | None = None,
+) -> dict[str, list]:
+    """Native matching candidates, optionally using an explicit Content version."""
+    dates = []
+    if settings.NUMBER_OF_SUGGESTED_DATES > 0:
+        with get_date_parser() as parser:
+            dates = sorted(
+                {
+                    value.strftime("%Y-%m-%d")
+                    for value in itertools.islice(
+                        parser.parse(
+                            document.filename if filename is None else filename,
+                            document.content if content is None else content,
+                        ),
+                        settings.NUMBER_OF_SUGGESTED_DATES,
+                    )
+                    if value is not None
+                },
+            )
+    return {
+        "correspondents": [
+            c.pk for c in match_correspondents(document, classifier, user)
+        ],
+        "tags": [t.pk for t in match_tags(document, classifier, user)],
+        "document_types": [
+            d.pk for d in match_document_types(document, classifier, user)
+        ],
+        "storage_paths": [
+            s.pk for s in match_storage_paths(document, classifier, user)
+        ],
+        "dates": dates,
+    }
 
 
 def matches(matching_model: MatchingModel, document: Document):

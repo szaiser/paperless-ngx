@@ -12,7 +12,6 @@ from django.test import SimpleTestCase
 from django.test import TestCase
 from django.test import override_settings
 
-from documents import tasks
 from documents.models import CustomField
 from documents.models import CustomFieldInstance
 from documents.models import Document
@@ -27,7 +26,6 @@ from paperless_ai.base_model import ClassificationSuggestions
 from paperless_ai.exceptions import StaleSuggestions
 from paperless_ai.exceptions import SuggestionProviderError
 from paperless_ai.exceptions import SuggestionProviderUnavailable
-from paperless_ai.suggestion_provider import applied_event
 from paperless_ai.suggestion_provider import document_snapshot
 from paperless_ai.suggestion_provider import post_provider
 
@@ -42,12 +40,7 @@ PROPOSAL = {
 
 
 def response_for(request: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "protocol_version": 1,
-        "request_id": request["request_id"],
-        "context_id": request["context_id"],
-        "suggestions": copy.deepcopy(PROPOSAL),
-    }
+    return copy.deepcopy(PROPOSAL)
 
 
 @override_settings(
@@ -137,11 +130,11 @@ class TestSuggestionProvider(DirectoriesMixin, TestCase):
 
         def handler(request: httpx.Request) -> httpx.Response:
             payload = json.loads(request.content)
-            self.assertEqual(payload["event"], "suggestions.requested")
+            self.assertEqual(payload["protocol_version"], 1)
             self.assertEqual(payload["document"], before)
             self.assertEqual(payload["classic_suggestions"]["tags"], [self.tag.pk])
             response = response_for(payload)
-            response["suggestions"]["tags"]["existing_ids"] = [self.tag.pk]
+            response["tags"]["existing_ids"] = [self.tag.pk]
             return httpx.Response(200, json=response)
 
         self.post.side_effect = post_provider
@@ -166,7 +159,7 @@ class TestSuggestionProvider(DirectoriesMixin, TestCase):
 
     @override_settings(NUMBER_OF_SUGGESTED_DATES=0)
     def test_disabled_date_suggestions_skip_the_parser(self) -> None:
-        with patch("paperless_ai.suggestion_provider.get_date_parser") as parser:
+        with patch("documents.matching.get_date_parser") as parser:
             self.classify()
         parser.assert_not_called()
         self.assertEqual(
@@ -188,7 +181,6 @@ class TestSuggestionProvider(DirectoriesMixin, TestCase):
         self.assertEqual(self.post.call_count, 2)
         first, second = [call.args[0] for call in self.post.call_args_list]
         self.assertEqual(first["context_id"], second["context_id"])
-        self.assertNotEqual(first["request_id"], second["request_id"])
         cache_get.assert_not_called()
         cache_set.assert_not_called()
 
@@ -266,26 +258,22 @@ class TestSuggestionProvider(DirectoriesMixin, TestCase):
         self.post.assert_not_called()
         self.llm.assert_called_once()
 
-    def test_response_must_echo_exact_request_and_context(self) -> None:
-        for key in ("request_id", "context_id"):
-            with self.subTest(key=key):
+    def test_context_fingerprint_includes_taxonomy(self) -> None:
+        self.classify()
+        first = self.post.call_args.args[0]["context_id"]
+        self.tag.name = "Renamed tag"
+        self.tag.save()
+        self.classify()
+        self.assertNotEqual(first, self.post.call_args.args[0]["context_id"])
 
-                def wrong(request: dict[str, Any]) -> dict[str, Any]:
-                    return {**response_for(request), key: "another-request"}
-
-                self.post.side_effect = wrong
-                with self.assertRaises(SuggestionProviderError):
-                    self.classify()
-
-    def test_protocol_version_requires_integer_one(self) -> None:
-        for version in (True, 1.0, "1", 0, 2):
-            with self.subTest(version=version):
-                self.post.side_effect = lambda request: {
-                    **response_for(request),
-                    "protocol_version": version,
-                }
-                with self.assertRaises(SuggestionProviderError):
-                    self.classify()
+    def test_native_candidates_and_provider_use_the_same_matching(self) -> None:
+        native = self.client.get(f"/api/documents/{self.document.pk}/suggestions/")
+        self.assertEqual(native.status_code, 200)
+        self.classify()
+        self.assertEqual(
+            native.json(),
+            self.post.call_args.args[0]["classic_suggestions"],
+        )
 
     def test_invisible_taxonomy_is_neither_sent_nor_accepted(self) -> None:
         limited = User.objects.create_user(username="limited")
@@ -299,7 +287,7 @@ class TestSuggestionProvider(DirectoriesMixin, TestCase):
                 [item["id"] for item in request["taxonomy"]["tags"]],
             )
             response = response_for(request)
-            response["suggestions"]["tags"]["existing_ids"] = [hidden.pk]
+            response["tags"]["existing_ids"] = [hidden.pk]
             return response
 
         self.post.side_effect = wrong
@@ -323,7 +311,7 @@ class TestSuggestionProvider(DirectoriesMixin, TestCase):
 
                 def invalid(request: dict[str, Any]) -> dict[str, Any]:
                     response = response_for(request)
-                    response["suggestions"][field] = value
+                    response[field] = value
                     return response
 
                 self.post.side_effect = invalid
@@ -373,79 +361,6 @@ class TestSuggestionProvider(DirectoriesMixin, TestCase):
         )
         self.assertEqual(self.post.call_args.args[0]["requester_id"], self.user.pk)
         self.llm.assert_not_called()
-
-    def test_background_apply_notifies_separately_without_updated_workflow_loop(
-        self,
-    ) -> None:
-        action = WorkflowAction.objects.create(
-            type=WorkflowAction.WorkflowActionType.APPLY_AI_SUGGESTIONS,
-            ai_suggestion_fields=[WorkflowAction.AISuggestionField.TITLE],
-            ai_overwrite_existing=True,
-        )
-        with (
-            patch("documents.tasks.notify_suggestions_applied.delay") as notify,
-            patch("documents.tasks.index_document.delay"),
-            patch("documents.tasks.document_updated") as updated,
-        ):
-            tasks.apply_ai_suggestions.apply(
-                args=(action.pk, self.document.pk),
-                task_id="synthetic-apply-task",
-                throw=True,
-            )
-        event = notify.call_args.args[0]
-        self.assertEqual(event["event_id"], "synthetic-apply-task")
-        self.assertEqual(event["document_id"], self.document.pk)
-        self.assertEqual(event["changed_fields"], ["title"])
-        self.assertNotIn("content", event)
-        updated.send.assert_not_called()
-
-    def test_notification_only_acknowledges_without_regenerating(self) -> None:
-        event = applied_event(self.document.pk, 1, ["title"], "synthetic-event")
-        self.post.side_effect = lambda value: {"event_id": value["event_id"]}
-        tasks.notify_suggestions_applied(event)
-        tasks.notify_suggestions_applied(event)
-        self.assertEqual(self.post.call_args.args[0], event)
-        self.document.refresh_from_db()
-        self.assertEqual(self.document.title, "Saved title")
-        self.llm.assert_not_called()
-
-    def test_notification_retries_reuse_event_without_regenerating(self) -> None:
-        event = applied_event(self.document.pk, 1, ["title"], "synthetic-event")
-        self.post.side_effect = [
-            SuggestionProviderUnavailable("Synthetic outage"),
-            {"event_id": event["event_id"]},
-        ]
-        result = tasks.notify_suggestions_applied.apply(args=(event,))
-        self.assertTrue(result.successful())
-        self.assertEqual(self.post.call_count, 2)
-        self.assertTrue(all(call.args == (event,) for call in self.post.call_args_list))
-        self.document.refresh_from_db()
-        self.assertEqual(self.document.title, "Saved title")
-        self.llm.assert_not_called()
-
-    def test_notification_rejects_mismatched_acknowledgement_without_retry(
-        self,
-    ) -> None:
-        self.post.return_value = {"event_id": "other-event"}
-        self.post.side_effect = None
-        result = tasks.notify_suggestions_applied.apply(
-            args=({"event_id": "synthetic-event"},),
-        )
-        self.assertIsInstance(result.result, SuggestionProviderError)
-        self.post.assert_called_once()
-
-    def test_notification_stops_after_retry_limit(self) -> None:
-        self.post.side_effect = SuggestionProviderUnavailable("Synthetic outage")
-        result = tasks.notify_suggestions_applied.apply(
-            args=({"event_id": "synthetic-event"},),
-        )
-        self.assertIsInstance(result.result, SuggestionProviderUnavailable)
-        self.assertEqual(self.post.call_count, 6)
-
-    @override_settings(AI_SUGGESTIONS_ENDPOINT="")
-    def test_disabling_provider_skips_queued_notification(self) -> None:
-        tasks.notify_suggestions_applied({"event_id": "synthetic-event"})
-        self.post.assert_not_called()
 
 
 @override_settings(
