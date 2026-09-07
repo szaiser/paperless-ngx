@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from tempfile import mkstemp
+from typing import Any
 
 from celery import Task
 from celery import shared_task
@@ -744,16 +745,57 @@ def apply_ai_suggestions(self, action_id: int, document_id: int) -> None:
         )
         return
 
-    if not apply_ai_suggestions_to_document(action, document):
+    changed_fields = apply_ai_suggestions_to_document(action, document)
+    if not changed_fields:
         return
 
     # No document_updated signal to avoid loop
     clear_document_caches(document.pk)
     index_document.delay(document.pk)
 
+    if settings.AI_SUGGESTIONS_ENDPOINT:
+        from paperless_ai.suggestion_provider import PROTOCOL_VERSION
+        from paperless_ai.suggestion_provider import document_snapshot
+        from paperless_ai.suggestion_provider import fingerprint
+
+        snapshot = document_snapshot(Document.objects.get(pk=document.pk))
+        notify_suggestions_applied.delay(
+            {
+                "protocol_version": PROTOCOL_VERSION,
+                "event": "suggestions.applied",
+                "event_id": self.request.id or str(uuid.uuid4()),
+                "document_id": document.pk,
+                "content_version_id": snapshot["content_version"]["id"],
+                "document_state_id": fingerprint(snapshot),
+                "workflow_action_id": action.pk,
+                "changed_fields": changed_fields,
+            },
+        )
+
     ai_config = AIConfig()
     if ai_config.llm_index_enabled:
         update_document_in_llm_index.apply_async(kwargs={"document": document})
+
+
+@shared_task(
+    autoretry_for=(SuggestionProviderUnavailable,),
+    max_retries=5,
+    retry_backoff=30,
+    retry_backoff_max=600,
+    retry_jitter=True,
+)
+def notify_suggestions_applied(event: dict[str, Any]) -> None:
+    """Retry delivery independently of the already completed metadata update."""
+    from paperless_ai.exceptions import SuggestionProviderError
+    from paperless_ai.suggestion_provider import post_provider
+
+    if not settings.AI_SUGGESTIONS_ENDPOINT:
+        return
+    response = post_provider(event)
+    if response.get("event_id") != event["event_id"]:
+        raise SuggestionProviderError(
+            "Suggestion provider did not acknowledge the event",
+        )
 
 
 @shared_task

@@ -434,7 +434,7 @@ Request handling must not modify the document. Paperless re-reads saved state
 after receiving the response and rejects suggestions if the version, text,
 metadata, tags or custom fields changed. Use a
 [Document Updated workflow](usage.md#workflow-trigger-types) for enrichment after
-a user saves. Automatic AI application does not trigger Document Updated.
+a user saves. Automatic AI application uses the notification below.
 
 External suggestions bypass Paperless's LLM cache. A provider may reuse results
 using the context fingerprint **and its own rules/configuration/model revision**.
@@ -448,6 +448,23 @@ The editor displays translated failure messages. Provider diagnostics, including
 HTTP status codes, are recorded in the Paperless server logs; these messages omit
 endpoint credentials and response bodies. Documents moved to the trash are
 rejected before contacting the provider or when checking the returned result.
+
+### Automatic-application notification
+
+After a workflow applies changes, a separate Celery task POSTs
+`event: suggestions.applied` to the same endpoint. Its fields are
+`protocol_version`, `event_id`, `document_id`, `content_version_id`,
+`document_state_id`, `workflow_action_id` and `changed_fields`; document text is
+not repeated. Acknowledge with HTTP 200 and `{"event_id": "the received event ID"}`.
+
+Deduplicate notifications by `event_id` and re-read current Paperless state
+before enrichment. Retries retain the event ID and do not repeat classification
+or metadata application. Transient delivery failures retry up to five times;
+exhausted retries remain visible in task-worker logs. Delivery depends on the
+existing task broker and is not transactional with the metadata update.
+
+User saves use Document Updated workflows. Automatic AI application uses this
+dedicated notification to avoid an Updated → Apply AI Suggestions loop.
 
 ## Extending Paperless-ngx
 
