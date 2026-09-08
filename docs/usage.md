@@ -339,6 +339,12 @@ disable the existing classifier-based suggestion system. Currently, both remote
 (via OpenAI-compatible APIs) and local (via Ollama) models are supported, see
 [configuration](configuration.md#ai) for details.
 
+Click **Suggest** in the document detail editor to request AI suggestions.
+Opening an Inbox document does not start an AI request. Select suggestions or edit
+the fields, then **Save** to apply your changes. The
+[Apply AI Suggestions workflow action](#workflow-actions) runs independently in
+the background when configured.
+
 ### Document Chat
 
 Paperless-ngx can use an AI LLM model to answer questions about a document or across multiple documents. Again, this feature works best when RAG is enabled. The chat feature is available in the upper app toolbar and will switch between chatting across multiple documents or a single document based on the current view.
