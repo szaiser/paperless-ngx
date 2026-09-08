@@ -1,12 +1,18 @@
+from datetime import date
+from typing import Annotated
 from typing import Any
 from typing import Final
-from typing import TypedDict
 
+from pydantic import AfterValidator
 from pydantic import BaseModel
+from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import TypeAdapter
 from pydantic import ValidationInfo
 from pydantic import field_validator
+from pydantic import with_config
 from pydantic.fields import FieldInfo
+from typing_extensions import TypedDict
 
 # taxonomy.py MAX_TAG_CANDIDATES = 10, prompt is "up to 3 relevant dates"
 MAX_EXISTING_IDS: Final = 10
@@ -186,25 +192,62 @@ class DocumentClassifierSchema(BaseModel):
     )
     @classmethod
     def _truncate(cls, value: Any, info: ValidationInfo) -> Any:
+        assert info.field_name is not None
         return _truncate_to_field_limit(value, cls.model_fields[info.field_name])
 
 
+def _unique(values: list[Any]) -> list[Any]:
+    return list(dict.fromkeys(values))
+
+
+def _valid_date(value: str) -> str:
+    date.fromisoformat(value)
+    return value
+
+
+@with_config(ConfigDict(extra="forbid"))
 class TaxonomyChoiceDict(TypedDict):
     """Internal representation of names and existing IDs for one taxonomy."""
 
-    existing_ids: list[int]
-    new_names: list[str]
+    existing_ids: Annotated[
+        list[Annotated[int, Field(gt=0)]],
+        Field(default_factory=list, max_length=100),
+        AfterValidator(_unique),
+    ]
+    new_names: Annotated[
+        list[Annotated[str, Field(max_length=MAX_TITLE_LENGTH, pattern=r"\S")]],
+        Field(default_factory=list, max_length=MAX_NEW_NAMES),
+        AfterValidator(_unique),
+    ]
 
 
+@with_config(ConfigDict(extra="forbid"))
 class ClassificationSuggestions(TypedDict):
     """Internal shape used after the flat LLM response is validated."""
 
-    title: str
+    title: Annotated[str, Field(max_length=MAX_TITLE_LENGTH)]
     tags: TaxonomyChoiceDict
     correspondents: TaxonomyChoiceDict
     document_types: TaxonomyChoiceDict
     storage_paths: TaxonomyChoiceDict
-    dates: list[str]
+    dates: Annotated[
+        list[
+            Annotated[
+                str,
+                Field(pattern=r"^\d{4}-\d{2}-\d{2}$"),
+                AfterValidator(_valid_date),
+            ]
+        ],
+        Field(max_length=MAX_DATES),
+    ]
+
+
+_suggestions_adapter = TypeAdapter(ClassificationSuggestions)
+
+
+def validate_classification_suggestions(value: Any) -> ClassificationSuggestions:
+    """Validate external suggestions without changing the LLM's lenient parsing."""
+    return _suggestions_adapter.validate_python(value, strict=True)
 
 
 def model_to_classification_suggestions(

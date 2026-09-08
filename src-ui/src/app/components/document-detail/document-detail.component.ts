@@ -904,6 +904,7 @@ export class DocumentDetailComponent
     this.updateFormForCustomFields()
     this.loadMetadataForSelectedVersion()
     if (
+      !this.aiEnabled &&
       this.permissionsService.currentUserHasObjectPermissions(
         PermissionAction.Change,
         doc

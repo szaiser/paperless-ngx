@@ -72,6 +72,8 @@ from paperless.logging import consume_task_id
 from paperless.parsers import ParserContext
 from paperless.parsers.registry import get_parser_registry
 from paperless_ai.exceptions import LLMTimeoutError
+from paperless_ai.exceptions import StaleSuggestions
+from paperless_ai.exceptions import SuggestionProviderUnavailable
 from paperless_ai.indexing import llm_index_add_or_update_document
 from paperless_ai.indexing import llm_index_remove_document
 from paperless_ai.indexing import update_llm_index
@@ -717,7 +719,7 @@ def llmindex_index(
 
 @shared_task(
     bind=True,
-    autoretry_for=(LLMTimeoutError,),
+    autoretry_for=(LLMTimeoutError, SuggestionProviderUnavailable, StaleSuggestions),
     max_retries=3,
     retry_backoff=60,
     retry_backoff_max=600,

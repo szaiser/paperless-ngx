@@ -9,6 +9,23 @@ from paperless_ai.base_model import DocumentClassifierSchema
 from paperless_ai.base_model import TaxonomyChoiceDict
 from paperless_ai.base_model import classification_suggestions_to_model
 from paperless_ai.base_model import model_to_classification_suggestions
+from paperless_ai.base_model import validate_classification_suggestions
+
+
+def test_internal_suggestions_validate_defaults_and_deduplicate():
+    source = {
+        "title": "Test",
+        "tags": {"existing_ids": [1, 1], "new_names": ["Test", "Test"]},
+        "correspondents": {},
+        "document_types": {},
+        "storage_paths": {},
+        "dates": ["2024-02-29"],
+    }
+    validated = validate_classification_suggestions(source)
+    assert validated["tags"] == {"existing_ids": [1], "new_names": ["Test"]}
+    assert validated["correspondents"] == {"existing_ids": [], "new_names": []}
+    assert source["tags"]["existing_ids"] == [1, 1]
+    assert isinstance(validated, dict)
 
 
 def test_document_classifier_schema_declared_defaults():

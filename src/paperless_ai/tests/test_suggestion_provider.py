@@ -1,0 +1,485 @@
+import copy
+import json
+import socket
+from collections.abc import Callable
+from contextlib import nullcontext
+from typing import Any
+from unittest.mock import patch
+
+import httpx
+from django.contrib.auth.models import User
+from django.test import SimpleTestCase
+from django.test import TestCase
+from django.test import override_settings
+
+from documents.models import CustomField
+from documents.models import CustomFieldInstance
+from documents.models import Document
+from documents.models import MatchingModel
+from documents.models import StoragePath
+from documents.models import Tag
+from documents.models import WorkflowAction
+from documents.tests.utils import DirectoriesMixin
+from documents.workflows.ai import apply_ai_suggestions_to_document
+from paperless_ai.ai_classifier import get_ai_document_classification
+from paperless_ai.base_model import ClassificationSuggestions
+from paperless_ai.exceptions import StaleSuggestions
+from paperless_ai.exceptions import SuggestionProviderError
+from paperless_ai.exceptions import SuggestionProviderUnavailable
+from paperless_ai.suggestion_provider import document_snapshot
+from paperless_ai.suggestion_provider import post_provider
+
+PROPOSAL = {
+    "title": "Synthetic proposal",
+    "tags": {"existing_ids": [], "new_names": []},
+    "correspondents": {"existing_ids": [], "new_names": []},
+    "document_types": {"existing_ids": [], "new_names": []},
+    "storage_paths": {"existing_ids": [], "new_names": []},
+    "dates": ["2026-01-02"],
+}
+
+
+def response_for(request: dict[str, Any]) -> dict[str, Any]:
+    return copy.deepcopy(PROPOSAL)
+
+
+@override_settings(
+    AI_ENABLED=True,
+    AI_SUGGESTIONS_ENDPOINT="https://provider.example.invalid/suggestions",
+    NUMBER_OF_SUGGESTED_DATES=3,
+)
+class TestSuggestionProvider(DirectoriesMixin, TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.user = User.objects.create_superuser(username="synthetic-reviewer")
+        self.document = Document.objects.create(
+            title="Saved title",
+            content="Synthetic invoice issued 2026-01-02",
+            checksum="synthetic-original",
+            owner=self.user,
+            mime_type="application/pdf",
+            original_filename="fixture.pdf",
+        )
+        self.tag = Tag.objects.create(
+            name="Invoice",
+            match="invoice",
+            matching_algorithm=MatchingModel.MATCH_ANY,
+        )
+        self.document.tags.add(self.tag)
+        self.post = self.enterContext(
+            patch(
+                "paperless_ai.suggestion_provider.post_provider",
+                side_effect=response_for,
+            ),
+        )
+        self.enterContext(
+            patch(
+                "paperless_ai.suggestion_provider.load_classifier",
+                return_value=None,
+            ),
+        )
+        self.llm = self.enterContext(patch("paperless_ai.ai_classifier.AIClient"))
+        self.client.force_login(self.user)
+
+    def classify(self) -> ClassificationSuggestions:
+        return get_ai_document_classification(self.document, self.user, "de")
+
+    def test_explicit_context_and_classic_candidates_without_writes(self) -> None:
+        field = CustomField.objects.create(
+            name="Synthetic amount",
+            data_type="monetary",
+        )
+        CustomFieldInstance.objects.create(
+            document=self.document,
+            field=field,
+            value_monetary="EUR10.00",
+        )
+        before = document_snapshot(self.document)
+        self.assertEqual(self.classify(), PROPOSAL)
+        request = self.post.call_args.args[0]
+        self.assertEqual(request["document"], before)
+        self.assertEqual(request["requester_id"], self.user.pk)
+        self.assertEqual(request["output_language"], "de")
+        self.assertEqual(request["classic_suggestions"]["tags"], [self.tag.pk])
+        self.assertEqual(request["document"]["custom_fields"][0]["value"], "EUR10.00")
+        self.assertEqual(
+            request["taxonomy"]["tags"],
+            [{"id": self.tag.pk, "name": "Invoice"}],
+        )
+        self.assertEqual(document_snapshot(self.document), before)
+        self.llm.assert_not_called()
+
+    def test_effective_content_carries_its_actual_version_identity(self) -> None:
+        version = Document.objects.create(
+            root_document=self.document,
+            version_index=2,
+            content="Synthetic revised text",
+            checksum="synthetic-version",
+            original_filename="revision.pdf",
+        )
+        self.classify()
+        snapshot = self.post.call_args.args[0]["document"]
+        self.assertEqual(snapshot["id"], self.document.pk)
+        self.assertEqual(snapshot["content_version"]["id"], version.pk)
+        self.assertEqual(snapshot["content_version"]["checksum"], "synthetic-version")
+        self.assertEqual(snapshot["content"], "Synthetic revised text")
+        self.assertEqual(snapshot["title"], "Saved title")
+
+    def test_native_endpoint_uses_the_http_adapter_without_writes(self) -> None:
+        before = document_snapshot(self.document)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            payload = json.loads(request.content)
+            self.assertEqual(payload["protocol_version"], 1)
+            self.assertEqual(payload["document"], before)
+            self.assertEqual(payload["classic_suggestions"]["tags"], [self.tag.pk])
+            response = response_for(payload)
+            response["tags"]["existing_ids"] = [self.tag.pk]
+            return httpx.Response(200, json=response)
+
+        self.post.side_effect = post_provider
+        with patch(
+            "paperless_ai.suggestion_provider.create_pinned_httpx_client",
+            return_value=httpx.Client(transport=httpx.MockTransport(handler)),
+        ):
+            response = self.client.get(
+                f"/api/documents/{self.document.pk}/ai_suggestions/",
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["title"], PROPOSAL["title"])
+        self.assertEqual(response.json()["tags"], [self.tag.pk])
+        self.assertEqual(document_snapshot(self.document), before)
+        self.llm.assert_not_called()
+
+    def test_document_permissions_are_checked_before_contacting_provider(self) -> None:
+        self.client.force_login(User.objects.create_user(username="other-reviewer"))
+        response = self.client.get(f"/api/documents/{self.document.pk}/ai_suggestions/")
+        self.assertEqual(response.status_code, 403)
+        self.post.assert_not_called()
+
+    @override_settings(NUMBER_OF_SUGGESTED_DATES=0)
+    def test_disabled_date_suggestions_skip_the_parser(self) -> None:
+        with patch("documents.matching.get_date_parser") as parser:
+            self.classify()
+        parser.assert_not_called()
+        self.assertEqual(
+            self.post.call_args.args[0]["classic_suggestions"]["dates"],
+            [],
+        )
+
+    def test_external_provider_bypasses_native_cache(self) -> None:
+        with (
+            patch("documents.views.get_llm_suggestion_cache") as cache_get,
+            patch("documents.views.set_llm_suggestions_cache") as cache_set,
+        ):
+            for _ in range(2):
+                response = self.client.get(
+                    f"/api/documents/{self.document.pk}/ai_suggestions/",
+                )
+                self.assertEqual(response.status_code, 200, response.content)
+                self.assertEqual(response.json()["title"], PROPOSAL["title"])
+        self.assertEqual(self.post.call_count, 2)
+        first, second = [call.args[0] for call in self.post.call_args_list]
+        self.assertEqual(first["context_id"], second["context_id"])
+        cache_get.assert_not_called()
+        cache_set.assert_not_called()
+
+    def test_metadata_and_ocr_changes_are_rejected_even_without_checksum_change(
+        self,
+    ) -> None:
+        for change in ({"title": "Human correction"}, {"content": "Corrected text"}):
+            with self.subTest(change=change):
+
+                def changed(request: dict[str, Any]) -> dict[str, Any]:
+                    Document.objects.filter(pk=self.document.pk).update(**change)
+                    return response_for(request)
+
+                self.post.side_effect = changed
+                with self.assertRaises(StaleSuggestions):
+                    self.classify()
+
+    def test_new_version_during_request_is_rejected(self) -> None:
+        def changed(request: dict[str, Any]) -> dict[str, Any]:
+            Document.objects.create(
+                root_document=self.document,
+                version_index=1,
+                content="New version",
+            )
+            return response_for(request)
+
+        self.post.side_effect = changed
+        with self.assertRaises(StaleSuggestions):
+            self.classify()
+
+    def test_document_deleted_before_or_during_request_is_rejected(self) -> None:
+        def deleted(request: dict[str, Any]) -> dict[str, Any]:
+            Document.objects.filter(pk=self.document.pk).delete()
+            return response_for(request)
+
+        self.post.side_effect = deleted
+        with self.assertRaises(StaleSuggestions):
+            self.classify()
+        self.post.reset_mock()
+        with self.assertRaises(StaleSuggestions):
+            self.classify()
+        self.post.assert_not_called()
+
+    def test_tag_changes_are_rejected(self) -> None:
+        def changed(request: dict[str, Any]) -> dict[str, Any]:
+            self.document.tags.clear()
+            return response_for(request)
+
+        self.post.side_effect = changed
+        with self.assertRaises(StaleSuggestions):
+            self.classify()
+
+    def test_custom_field_changes_are_rejected(self) -> None:
+        field = CustomField.objects.create(name="Synthetic note", data_type="string")
+
+        def changed(request: dict[str, Any]) -> dict[str, Any]:
+            CustomFieldInstance.objects.create(
+                document=self.document,
+                field=field,
+                value_text="Changed",
+            )
+            return response_for(request)
+
+        self.post.side_effect = changed
+        with self.assertRaises(StaleSuggestions):
+            self.classify()
+
+    @override_settings(AI_SUGGESTIONS_ENDPOINT="")
+    def test_disabled_provider_retains_upstream_classifier(self) -> None:
+        self.llm.return_value.run_llm_query.return_value = copy.deepcopy(PROPOSAL)
+        self.assertEqual(
+            get_ai_document_classification(self.document, self.user),
+            PROPOSAL,
+        )
+        self.post.assert_not_called()
+        self.llm.assert_called_once()
+
+    def test_context_fingerprint_includes_taxonomy(self) -> None:
+        self.classify()
+        first = self.post.call_args.args[0]["context_id"]
+        self.tag.name = "Renamed tag"
+        self.tag.save()
+        self.classify()
+        self.assertNotEqual(first, self.post.call_args.args[0]["context_id"])
+
+    def test_native_candidates_and_provider_use_the_same_matching(self) -> None:
+        native = self.client.get(f"/api/documents/{self.document.pk}/suggestions/")
+        self.assertEqual(native.status_code, 200)
+        self.classify()
+        self.assertEqual(
+            native.json(),
+            self.post.call_args.args[0]["classic_suggestions"],
+        )
+
+    def test_invisible_taxonomy_is_neither_sent_nor_accepted(self) -> None:
+        limited = User.objects.create_user(username="limited")
+        hidden = Tag.objects.create(name="Private synthetic tag", owner=self.user)
+        self.document.owner = limited
+        self.document.save()
+
+        def wrong(request: dict[str, Any]) -> dict[str, Any]:
+            self.assertNotIn(
+                hidden.pk,
+                [item["id"] for item in request["taxonomy"]["tags"]],
+            )
+            response = response_for(request)
+            response["tags"]["existing_ids"] = [hidden.pk]
+            return response
+
+        self.post.side_effect = wrong
+        with self.assertRaises(SuggestionProviderError):
+            get_ai_document_classification(self.document, limited)
+
+    def test_invalid_response_fails_without_fallback(self) -> None:
+        for field, value in (
+            ("title", "x" * 129),
+            ("dates", ["2026-02-30"]),
+            ("dates", ["2026-01-01"] * 4),
+            ("tags", {"existing_ids": [True]}),
+            ("tags", {"existing_ids": [-1]}),
+            ("tags", {"existing_ids": list(range(1, 102))}),
+            ("tags", {"new_names": [" "]}),
+            ("tags", {"new_names": ["x" * 129]}),
+            ("tags", {"new_names": ["new"] * 9}),
+            ("extra", "unexpected"),
+        ):
+            with self.subTest(field=field):
+
+                def invalid(request: dict[str, Any]) -> dict[str, Any]:
+                    response = response_for(request)
+                    response[field] = value
+                    return response
+
+                self.post.side_effect = invalid
+                with self.assertRaises(SuggestionProviderError):
+                    self.classify()
+        self.llm.assert_not_called()
+
+    def test_view_reports_provider_errors_without_changing_document(self) -> None:
+        for error, code in (
+            (StaleSuggestions, 409),
+            (SuggestionProviderUnavailable, 503),
+            (SuggestionProviderError, 502),
+        ):
+            with self.subTest(error=error):
+                self.post.side_effect = error("Synthetic provider error")
+                response = self.client.get(
+                    f"/api/documents/{self.document.pk}/ai_suggestions/",
+                )
+                self.assertEqual(response.status_code, code)
+                self.assertNotIn("Synthetic provider error", response.content.decode())
+                self.document.refresh_from_db()
+                self.assertEqual(self.document.title, "Saved title")
+
+    @override_settings(AI_ENABLED=False)
+    def test_native_ai_enable_gate_still_applies(self) -> None:
+        response = self.client.get(f"/api/documents/{self.document.pk}/ai_suggestions/")
+        self.assertEqual(response.status_code, 400)
+        self.post.assert_not_called()
+
+    def test_workflow_uses_same_provider_and_native_field_selection(self) -> None:
+        storage = StoragePath.objects.create(name="Existing path", path="existing")
+        self.document.storage_path = storage
+        self.document.save()
+        action = WorkflowAction.objects.create(
+            type=WorkflowAction.WorkflowActionType.APPLY_AI_SUGGESTIONS,
+            ai_suggestion_fields=[WorkflowAction.AISuggestionField.TITLE],
+            ai_overwrite_existing=True,
+        )
+        fields = apply_ai_suggestions_to_document(action, self.document)
+        self.document.refresh_from_db()
+        self.assertEqual(fields, ["title"])
+        self.assertEqual(self.document.title, PROPOSAL["title"])
+        self.assertEqual(self.document.storage_path_id, storage.pk)
+        self.assertEqual(
+            list(self.document.tags.values_list("pk", flat=True)),
+            [self.tag.pk],
+        )
+        self.assertEqual(self.post.call_args.args[0]["requester_id"], self.user.pk)
+        self.llm.assert_not_called()
+
+
+@override_settings(
+    AI_SUGGESTIONS_ENDPOINT="https://provider.example.invalid/suggestions",
+    AI_SUGGESTIONS_API_KEY="synthetic-only",
+    AI_SUGGESTIONS_ALLOW_INTERNAL_ENDPOINTS=False,
+)
+class TestProviderTransport(SimpleTestCase):
+    def run_http(
+        self,
+        handler: Callable[[httpx.Request], httpx.Response],
+    ) -> dict[str, Any]:
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        with (
+            patch(
+                "paperless_ai.suggestion_provider.create_pinned_httpx_client",
+                return_value=client,
+            ) as factory,
+            patch(
+                "paperless_ai.suggestion_provider.db_connection_released",
+                return_value=nullcontext(),
+            ),
+        ):
+            result = post_provider({"synthetic": True})
+        factory.assert_called_once_with(
+            "https://provider.example.invalid/suggestions",
+            allow_internal=False,
+            timeout=120,
+            follow_redirects=False,
+            trust_env=False,
+        )
+        return result
+
+    def test_authenticated_post(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual(request.headers["Authorization"], "Bearer synthetic-only")
+            self.assertEqual(json.loads(request.content), {"synthetic": True})
+            return httpx.Response(200, json={"ok": True})
+
+        self.assertEqual(self.run_http(handler), {"ok": True})
+
+    def test_retryable_http_responses(self) -> None:
+        for code in (408, 409, 425, 429, 500, 503):
+            with (
+                self.subTest(code=code),
+                self.assertRaises(SuggestionProviderUnavailable),
+            ):
+                self.run_http(
+                    lambda request: httpx.Response(code, text="private response body"),
+                )
+
+    def test_redirects_and_invalid_payloads_are_not_accepted(self) -> None:
+        for response in (
+            httpx.Response(302, headers={"Location": "http://elsewhere.invalid"}),
+            httpx.Response(200, content=b"x" * 1_048_577),
+            httpx.Response(200, text="not JSON"),
+            httpx.Response(200, json=[]),
+        ):
+            with (
+                self.subTest(response=response),
+                self.assertRaises(SuggestionProviderError),
+            ):
+                self.run_http(lambda request: response)
+
+    def test_transport_failure_does_not_expose_endpoint_credentials(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("sensitive transport detail")
+
+        with self.assertRaises(SuggestionProviderUnavailable) as error:
+            self.run_http(handler)
+        self.assertNotIn("sensitive", str(error.exception))
+
+    def test_malformed_http_encoding_is_a_provider_error(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                headers={"Content-Encoding": "gzip"},
+                content=b"not gzip",
+            )
+
+        with self.assertRaises(SuggestionProviderError):
+            self.run_http(handler)
+
+    def test_invalid_url_is_a_provider_error(self) -> None:
+        with (
+            patch(
+                "paperless_ai.suggestion_provider.create_pinned_httpx_client",
+                side_effect=httpx.InvalidURL("Sensitive endpoint detail"),
+            ),
+            patch(
+                "paperless_ai.suggestion_provider.db_connection_released",
+                return_value=nullcontext(),
+            ),
+            self.assertRaises(SuggestionProviderError) as error,
+        ):
+            post_provider({"synthetic": True})
+        self.assertNotIn("Sensitive", str(error.exception))
+
+    def test_dns_failure_is_retryable(self) -> None:
+        with (
+            patch(
+                "paperless.network.socket.getaddrinfo",
+                side_effect=socket.gaierror(socket.EAI_AGAIN, "Temporary DNS failure"),
+            ),
+            patch(
+                "paperless_ai.suggestion_provider.db_connection_released",
+                return_value=nullcontext(),
+            ),
+            self.assertRaises(SuggestionProviderUnavailable),
+        ):
+            post_provider({"synthetic": True})
+
+    @override_settings(AI_SUGGESTIONS_ENDPOINT="http://127.0.0.1:8080/suggestions")
+    def test_internal_endpoint_requires_explicit_opt_in(self) -> None:
+        with (
+            patch(
+                "paperless_ai.suggestion_provider.db_connection_released",
+                return_value=nullcontext(),
+            ),
+            self.assertRaises(SuggestionProviderError),
+        ):
+            post_provider({"synthetic": True})
