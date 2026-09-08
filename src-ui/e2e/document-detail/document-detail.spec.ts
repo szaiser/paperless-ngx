@@ -4,10 +4,12 @@ for (const width of [1440, 390]) {
   test(`should save a selected title suggestion explicitly at ${width}px`, async ({
     page,
   }) => {
-    const documentId = width === 1440 ? 60 : 61
+    // Both fixture documents have Inbox, which used to request AI on opening.
+    const documentId = width === 1440 ? 7 : 8
     const apiUrl = `http://localhost:8001/api/documents/${documentId}/`
-    const currentTitle = `document ${documentId}`
+    const currentTitle = `test document ${documentId}`
     const suggestedTitle = `Suggested title ${documentId}`
+    let suggestionRequests = 0
 
     // Keep AI responses deterministic while using the real editor and save API.
     await page.route('**/api/ui_settings/', async (route) => {
@@ -18,8 +20,9 @@ for (const width of [1440, 390]) {
     })
     await page.route(
       `**/api/documents/${documentId}/ai_suggestions/`,
-      (route) =>
-        route.fulfill({
+      (route) => {
+        suggestionRequests++
+        return route.fulfill({
           json: {
             title: suggestedTitle,
             tags: [],
@@ -33,15 +36,20 @@ for (const width of [1440, 390]) {
             dates: [],
           },
         })
+      }
     )
 
     await page.setViewportSize({ width, height: 1000 })
     await page.goto(`/documents/${documentId}/details`)
     const title = page.locator('pngx-input-text[formcontrolname="title"]')
     await expect(title.locator('input')).toHaveValue(currentTitle)
-    await page.getByRole('button', { name: 'Suggest', exact: true }).click()
+    const suggest = page.getByRole('button', { name: 'Suggest', exact: true })
+    await expect(suggest).toBeEnabled()
+    expect(suggestionRequests).toBe(0)
+    await suggest.click()
     await title.getByText(suggestedTitle, { exact: true }).click()
     await expect(title.locator('input')).toHaveValue(suggestedTitle)
+    expect(suggestionRequests).toBe(1)
 
     const headers = { Referer: page.url() }
     const beforeSave = await page.request.get(apiUrl, { headers })
@@ -59,6 +67,8 @@ for (const width of [1440, 390]) {
       expect((await saved).ok()).toBe(true)
       await page.reload()
       await expect(title.locator('input')).toHaveValue(suggestedTitle)
+      await expect(suggest).toBeEnabled()
+      expect(suggestionRequests).toBe(1)
     } finally {
       const restored = await page.request.patch(apiUrl, {
         headers,

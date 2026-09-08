@@ -1490,7 +1490,7 @@ describe('DocumentDetailComponent', () => {
     })
   })
 
-  it('should get AI suggestions when AI is enabled', () => {
+  it('should request AI suggestions only on demand when AI is enabled', () => {
     const getSetting = settingsService.get.bind(settingsService)
     jest
       .spyOn(settingsService, 'get')
@@ -1509,6 +1509,13 @@ describe('DocumentDetailComponent', () => {
     )
     initNormally()
     expect(suggestionsSpy).not.toHaveBeenCalled()
+    expect(aiSuggestionsSpy).not.toHaveBeenCalled()
+    expect(component.suggestionsLoading()).toBeFalsy()
+
+    fixture.debugElement
+      .query(By.css('pngx-suggestions-dropdown button'))
+      .nativeElement.click()
+
     expect(aiSuggestionsSpy).toHaveBeenCalled()
     expect(component.suggestions()).toEqual({
       tags: [42, 43],
@@ -1559,6 +1566,7 @@ describe('DocumentDetailComponent', () => {
       .spyOn(documentService, 'getAiSuggestions')
       .mockReturnValue(pending.asObservable())
     initNormally()
+    component.getSuggestions()
     expect(component.suggestionsLoading()).toBeTruthy()
 
     // the in-flight request is cancelled, e.g. by a websocket-driven reload

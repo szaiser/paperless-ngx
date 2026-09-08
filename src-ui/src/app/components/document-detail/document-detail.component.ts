@@ -954,6 +954,7 @@ export class DocumentDetailComponent
     this.loadMetadataForSelectedVersion()
     if (
       this.autoSuggest &&
+      !this.aiEnabled &&
       this.permissionsService.currentUserHasObjectPermissions(
         PermissionAction.Change,
         doc
