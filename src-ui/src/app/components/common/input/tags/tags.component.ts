@@ -215,6 +215,7 @@ export class TagsComponent implements OnInit, ControlValueAccessor {
     this.value = [...this.value, id]
     this.onAdd(this.getTag(id))
     this.onChange(this.value)
+    this.changeDetector.markForCheck()
   }
 
   get hasPrivate(): boolean {

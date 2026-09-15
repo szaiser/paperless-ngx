@@ -1,4 +1,3 @@
-import itertools
 import logging
 import os
 import platform
@@ -145,10 +144,7 @@ from documents.filters import StoragePathFilterSet
 from documents.filters import TagFilterSet
 from documents.mail import EmailAttachment
 from documents.mail import send_email
-from documents.matching import match_correspondents
-from documents.matching import match_document_types
-from documents.matching import match_storage_paths
-from documents.matching import match_tags
+from documents.matching import get_classic_document_suggestions
 from documents.models import Correspondent
 from documents.models import CustomField
 from documents.models import CustomFieldInstance
@@ -181,7 +177,6 @@ from documents.permissions import permitted_document_ids
 from documents.permissions import permitted_object_ids
 from documents.permissions import set_permissions_for_object
 from documents.permissions import user_is_unrestricted
-from documents.plugins.date_parsing import get_date_parser
 from documents.schema import generate_object_with_permissions_schema
 from documents.search import SearchHit
 from documents.serialisers import AcknowledgeTasksViewSerializer
@@ -252,6 +247,9 @@ from paperless_ai.ai_classifier import get_ai_document_classification
 from paperless_ai.ai_classifier import get_llm_output_language
 from paperless_ai.chat import stream_chat_with_documents
 from paperless_ai.exceptions import LLMTimeoutError
+from paperless_ai.exceptions import StaleSuggestions
+from paperless_ai.exceptions import SuggestionProviderError
+from paperless_ai.exceptions import SuggestionProviderUnavailable
 from paperless_ai.matching import extract_unmatched_names
 from paperless_ai.matching import match_correspondents_by_name
 from paperless_ai.matching import match_document_types_by_name
@@ -1483,33 +1481,7 @@ class DocumentViewSet(
 
         classifier = load_classifier()
 
-        dates = []
-        if settings.NUMBER_OF_SUGGESTED_DATES > 0:
-            with get_date_parser() as date_parser:
-                gen = date_parser.parse(doc.filename, doc.content)
-                dates = sorted(
-                    {
-                        i
-                        for i in itertools.islice(
-                            gen,
-                            settings.NUMBER_OF_SUGGESTED_DATES,
-                        )
-                    },
-                )
-
-        resp_data = {
-            "correspondents": [
-                c.id for c in match_correspondents(doc, classifier, request.user)
-            ],
-            "tags": [t.id for t in match_tags(doc, classifier, request.user)],
-            "document_types": [
-                dt.id for dt in match_document_types(doc, classifier, request.user)
-            ],
-            "storage_paths": [
-                dt.id for dt in match_storage_paths(doc, classifier, request.user)
-            ],
-            "dates": [date.strftime("%Y-%m-%d") for date in dates if date is not None],
-        }
+        resp_data = get_classic_document_suggestions(doc, classifier, request.user)
 
         # Cache the suggestions and the classifier hash for later
         set_suggestions_cache(doc.pk, resp_data, classifier)
@@ -1555,9 +1527,14 @@ class DocumentViewSet(
             if part
         )
 
-        cached_llm_suggestions = get_llm_suggestion_cache(
-            doc.pk,
-            backend=llm_cache_backend,
+        # External providers own reuse, including their rule/config revision.
+        cached_llm_suggestions = (
+            None
+            if settings.AI_SUGGESTIONS_ENDPOINT
+            else get_llm_suggestion_cache(
+                doc.pk,
+                backend=llm_cache_backend,
+            )
         )
 
         if cached_llm_suggestions:
@@ -1579,6 +1556,21 @@ class DocumentViewSet(
                     request.user,
                     output_language,
                 )
+            except SuggestionProviderError as exc:
+                logger.warning(
+                    "Suggestion provider failed for document %s: %s",
+                    doc.pk,
+                    exc,
+                )
+                code = status.HTTP_502_BAD_GATEWAY
+                message = _("The suggestion provider returned an invalid response.")
+                if isinstance(exc, StaleSuggestions):
+                    code = status.HTTP_409_CONFLICT
+                    message = _("Document changed. Request suggestions again.")
+                elif isinstance(exc, SuggestionProviderUnavailable):
+                    code = status.HTTP_503_SERVICE_UNAVAILABLE
+                    message = _("The suggestion provider is temporarily unavailable.")
+                return Response({"ai": [message]}, status=code)
             except ValueError as exc:
                 logger.exception(
                     "Invalid AI configuration while generating suggestions for "
@@ -1602,11 +1594,12 @@ class DocumentViewSet(
                     {"ai": [_("AI backend request timed out.")]},
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
-            set_llm_suggestions_cache(
-                doc.pk,
-                llm_suggestions,
-                backend=llm_cache_backend,
-            )
+            if not settings.AI_SUGGESTIONS_ENDPOINT:
+                set_llm_suggestions_cache(
+                    doc.pk,
+                    llm_suggestions,
+                    backend=llm_cache_backend,
+                )
 
         tags_choice: TaxonomyChoiceDict = llm_suggestions["tags"]
         correspondents_choice: TaxonomyChoiceDict = llm_suggestions["correspondents"]
