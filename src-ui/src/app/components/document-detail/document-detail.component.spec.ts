@@ -625,6 +625,35 @@ describe('DocumentDetailComponent', () => {
     expect(component.suggestions().suggested_tags).not.toContain('NewTag12')
   })
 
+  it('should select and display a newly suggested tag after the async catalogue refresh', async () => {
+    initNormally()
+    const newTag: Tag = {
+      id: 12,
+      name: 'NewTag12',
+      color: '#ff0000',
+      text_color: '#000000',
+      is_inbox_tag: false,
+    }
+    const refresh = new Subject<any>()
+    jest.spyOn(TestBed.inject(TagService), 'listAll').mockReturnValue(refresh)
+    component.suggestions.set({ suggested_tags: ['NewTag12'] })
+    let openModal: NgbModalRef
+    modalService.activeInstances.subscribe((modal) => (openModal = modal[0]))
+    component.createTag('NewTag12')
+    await fixture.whenStable()
+    openModal.componentInstance.succeeded.next(newTag)
+    await fixture.whenStable()
+    refresh.next({ results: [...component.tagsInput.tags, newTag] })
+    refresh.complete()
+    await fixture.whenStable()
+    expect(component.documentForm.get('tags').value).toContain(12)
+    expect(component.document().tags).toContain(12)
+    expect(
+      fixture.nativeElement.querySelector('pngx-input-tags .ng-value-container')
+        .textContent
+    ).toContain('NewTag12')
+  })
+
   it('should support creating document type, remove from suggestions', () => {
     initNormally()
     component.suggestions.set({
