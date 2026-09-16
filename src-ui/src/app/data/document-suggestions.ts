@@ -1,4 +1,5 @@
 export interface DocumentSuggestions {
+  suggestion_details?: Record<string, Record<number, string>>
   title?: string
 
   tags?: number[]

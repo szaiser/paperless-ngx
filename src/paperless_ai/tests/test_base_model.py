@@ -357,9 +357,7 @@ def test_model_conversion_matches_internal_typed_dict_keys():
     schema = DocumentClassifierSchema(title="T", tags=["Tag"])
     suggestions = model_to_classification_suggestions(schema)
 
-    assert set(suggestions.keys()) == set(
-        ClassificationSuggestions.__annotations__.keys(),
-    )
+    assert set(suggestions.keys()) == ClassificationSuggestions.__required_keys__
     assert set(suggestions["tags"].keys()) == set(
         TaxonomyChoiceDict.__annotations__.keys(),
     )

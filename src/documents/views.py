@@ -254,6 +254,7 @@ from paperless_ai.chat import stream_chat_with_documents
 from paperless_ai.exceptions import LLMProviderError
 from paperless_ai.exceptions import LLMTimeoutError
 from paperless_ai.exceptions import StaleSuggestions
+from paperless_ai.exceptions import SuggestionCatalogUnavailable
 from paperless_ai.exceptions import SuggestionProviderError
 from paperless_ai.exceptions import SuggestionProviderUnavailable
 from paperless_ai.matching import extract_unmatched_names
@@ -1679,6 +1680,9 @@ class DocumentViewSet(
                 if isinstance(exc, StaleSuggestions):
                     code = status.HTTP_409_CONFLICT
                     message = _("Document changed. Request suggestions again.")
+                elif isinstance(exc, SuggestionCatalogUnavailable):
+                    code = status.HTTP_503_SERVICE_UNAVAILABLE
+                    message = str(exc)
                 elif isinstance(exc, SuggestionProviderUnavailable):
                     code = status.HTTP_503_SERVICE_UNAVAILABLE
                     message = _("The suggestion provider is temporarily unavailable.")
@@ -1782,6 +1786,19 @@ class DocumentViewSet(
 
         resp_data = {
             "title": llm_suggestions["title"],
+            "suggestion_details": {
+                kind: {
+                    str(obj.pk): details[str(obj.pk)]
+                    for obj in objects
+                    if str(obj.pk) in details
+                }
+                for kind, objects in (
+                    ("tags", matched_tags),
+                    ("correspondents", matched_correspondents),
+                    ("document_types", matched_types),
+                )
+                if (details := llm_suggestions.get("suggestion_details", {}).get(kind))
+            },
             "tags": [t.id for t in matched_tags],
             "suggested_tags": extract_unmatched_names(
                 tags_choice["new_names"],
@@ -1804,6 +1821,9 @@ class DocumentViewSet(
             ),
             "dates": llm_suggestions["dates"],
         }
+
+        if not resp_data["suggestion_details"]:
+            resp_data.pop("suggestion_details")
 
         return Response(resp_data)
 

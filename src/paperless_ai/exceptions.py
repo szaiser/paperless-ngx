@@ -14,5 +14,9 @@ class SuggestionProviderUnavailable(SuggestionProviderError):
     """A transport failure or retryable HTTP response."""
 
 
+class SuggestionCatalogUnavailable(SuggestionProviderError):
+    """An explicit provider catalog error safe to show to its authenticated user."""
+
+
 class StaleSuggestions(SuggestionProviderError):
     """Document state changed while suggestions were being generated."""

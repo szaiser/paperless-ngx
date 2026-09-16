@@ -95,6 +95,9 @@ export class TagsComponent implements OnInit, ControlValueAccessor {
   suggestions: number[]
 
   @Input()
+  suggestionDetails: Record<number, string> = {}
+
+  @Input()
   allowCreate: boolean = true
 
   @Input()

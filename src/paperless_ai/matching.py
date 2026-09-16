@@ -3,6 +3,7 @@ import logging
 import re
 from typing import TypeVar
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.db.models import Model
 from django.db.models import QuerySet
@@ -72,7 +73,9 @@ def _match_by_name(
     queryset = model.objects.filter(
         pk__in=permitted_object_ids(user, model, perm),
     )
-    return _match_names_to_queryset(names, queryset)
+    return _match_names_to_queryset(
+        names, queryset, allow_fuzzy=not bool(settings.AI_SUGGESTIONS_ENDPOINT),
+    )
 
 
 def match_tags_by_name(names: list[str], user: User | None) -> list[Tag]:
@@ -111,6 +114,8 @@ def _match_names_to_queryset(
     names: list[str],
     queryset: QuerySet[ModelT],
     attr: str = "name",
+    *,
+    allow_fuzzy: bool = True,
 ) -> list[ModelT]:
     """Match each name to at most one object, exactly first and fuzzily as a
     fallback. A matched object is removed from the pool so two names can never
@@ -124,6 +129,21 @@ def _match_names_to_queryset(
         if not name:
             continue
         target = _normalize(name)
+        if not allow_fuzzy:
+            exact = next(
+                (
+                    obj
+                    for obj in objects
+                    if getattr(obj, attr).strip().casefold() == name.strip().casefold()
+                ),
+                None,
+            )
+            if exact is not None:
+                results.append(exact)
+                index = objects.index(exact)
+                objects.pop(index)
+                object_names.pop(index)
+            continue
 
         if target in object_names:
             index = object_names.index(target)

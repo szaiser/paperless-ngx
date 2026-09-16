@@ -13,9 +13,11 @@ from django.test import TestCase
 from django.test import override_settings
 
 from documents import tasks
+from documents.models import Correspondent
 from documents.models import CustomField
 from documents.models import CustomFieldInstance
 from documents.models import Document
+from documents.models import DocumentType
 from documents.models import MatchingModel
 from documents.models import StoragePath
 from documents.models import Tag
@@ -25,6 +27,7 @@ from documents.workflows.ai import apply_ai_suggestions_to_document
 from paperless_ai.ai_classifier import get_ai_document_classification
 from paperless_ai.base_model import ClassificationSuggestions
 from paperless_ai.exceptions import StaleSuggestions
+from paperless_ai.exceptions import SuggestionCatalogUnavailable
 from paperless_ai.exceptions import SuggestionProviderError
 from paperless_ai.exceptions import SuggestionProviderUnavailable
 from paperless_ai.suggestion_provider import document_snapshot
@@ -84,6 +87,61 @@ class TestSuggestionProvider(DirectoriesMixin, TestCase):
 
     def classify(self) -> ClassificationSuggestions:
         return get_ai_document_classification(self.document, self.user, "de")
+
+    def test_external_new_identifier_is_never_fuzzily_resolved_to_another_depot(self):
+        other = Tag.objects.create(name="Depot 123579983")
+        requested = "Depot 123789194"
+        result = copy.deepcopy(PROPOSAL)
+        result["tags"]["new_names"] = [requested]
+        self.post.side_effect = lambda request: result
+        before = document_snapshot(self.document)
+        response = self.client.get(f"/api/documents/{self.document.pk}/ai_suggestions/")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(other.id, response.json()["tags"])
+        self.assertEqual(response.json()["suggested_tags"], [requested])
+        self.assertEqual(document_snapshot(self.document), before)
+
+    def test_alternatives_and_explanations_reach_the_editor_without_overwriting_selection(
+        self,
+    ):
+        issuer = Correspondent.objects.create(name="Municipality")
+        bank = Correspondent.objects.create(name="Bank in payment footer")
+        receipt = DocumentType.objects.create(name="Receipt")
+        letter = DocumentType.objects.create(name="Letter")
+        self.document.correspondent = issuer
+        self.document.document_type = receipt
+        self.document.save()
+        result = copy.deepcopy(PROPOSAL)
+        result["correspondents"]["existing_ids"] = [issuer.id, bank.id]
+        result["document_types"]["existing_ids"] = [receipt.id, letter.id]
+        result["suggestion_details"] = {
+            "correspondents": {
+                str(bank.id): "Bank mention, not proof of issuer",
+                "999999": "invisible",
+            },
+        }
+        self.post.side_effect = lambda request: result
+        before = document_snapshot(self.document)
+        response = self.client.get(f"/api/documents/{self.document.pk}/ai_suggestions/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.json()["correspondents"]), {issuer.id, bank.id})
+        self.assertEqual(
+            set(response.json()["document_types"]),
+            {receipt.id, letter.id},
+        )
+        self.assertEqual(
+            response.json()["suggestion_details"]["correspondents"],
+            {str(bank.id): "Bank mention, not proof of issuer"},
+        )
+        self.assertEqual(document_snapshot(self.document), before)
+
+    def test_catalog_error_reaches_user_without_document_changes(self):
+        self.post.side_effect = SuggestionCatalogUnavailable(
+            "finance: Missing catalog tag Depot 123",
+        )
+        response = self.client.get(f"/api/documents/{self.document.pk}/ai_suggestions/")
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("Missing catalog tag Depot 123", response.json()["ai"][0])
 
     def test_explicit_context_and_classic_candidates_without_writes(self) -> None:
         field = CustomField.objects.create(
@@ -211,6 +269,19 @@ class TestSuggestionProvider(DirectoriesMixin, TestCase):
         self.post.side_effect = changed
         with self.assertRaises(StaleSuggestions):
             self.classify()
+
+    def test_catalog_rename_during_request_is_rejected(self) -> None:
+        def changed(request):
+            result = response_for(request)
+            result["tags"]["existing_ids"] = [self.tag.pk]
+            Tag.objects.filter(pk=self.tag.pk).update(name="Different account")
+            return result
+
+        self.post.side_effect = changed
+        response = self.client.get(f"/api/documents/{self.document.pk}/ai_suggestions/")
+        self.assertEqual(response.status_code, 409)
+        self.document.refresh_from_db()
+        self.assertEqual(self.document.title, "Saved title")
 
     def test_document_deleted_before_or_during_request_is_rejected(self) -> None:
         def deleted(request: dict[str, Any]) -> dict[str, Any]:
@@ -475,6 +546,18 @@ class TestProviderTransport(SimpleTestCase):
             return httpx.Response(200, json={"ok": True})
 
         self.assertEqual(self.run_http(handler), {"ok": True})
+
+    def test_explicit_catalog_error_is_preserved_but_generic_errors_stay_private(self):
+        with self.assertRaisesRegex(SuggestionCatalogUnavailable, "catalog tag"):
+            self.run_http(
+                lambda request: httpx.Response(
+                    503,
+                    json={
+                        "code": "addon_catalog_unavailable",
+                        "detail": "Missing catalog tag",
+                    },
+                ),
+            )
 
     def test_retryable_http_responses(self) -> None:
         for code in (408, 409, 425, 429, 500, 503):

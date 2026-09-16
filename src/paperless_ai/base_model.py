@@ -2,6 +2,7 @@ from datetime import date
 from typing import Annotated
 from typing import Any
 from typing import Final
+from typing import NotRequired
 
 from pydantic import AfterValidator
 from pydantic import BaseModel
@@ -230,6 +231,9 @@ class ClassificationSuggestions(TypedDict):
     correspondents: TaxonomyChoiceDict
     document_types: TaxonomyChoiceDict
     storage_paths: TaxonomyChoiceDict
+    suggestion_details: NotRequired[
+        dict[str, dict[str, Annotated[str, Field(max_length=1000)]]]
+    ]
     dates: Annotated[
         list[
             Annotated[

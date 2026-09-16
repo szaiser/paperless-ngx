@@ -92,6 +92,9 @@ export class SelectComponent extends AbstractInputComponent<number | string> {
   suggestions: number[]
 
   @Input()
+  suggestionDetails: Record<number, string> = {}
+
+  @Input()
   placeholder: string
 
   @Input()
@@ -141,6 +144,7 @@ export class SelectComponent extends AbstractInputComponent<number | string> {
       return this.suggestions
         .filter((id) => id != this.value)
         .map((id) => this.items.find((item) => item.id == id))
+        .filter((item) => item != null)
     } else {
       return []
     }

@@ -58,6 +58,19 @@ describe('SelectComponent', () => {
     fixture.detectChanges()
   })
 
+  it('shows the reason for an alternative without selecting it', () => {
+    component.items = items
+    component.value = 1
+    component.suggestions = [1, 2, 999]
+    component.suggestionDetails = { 2: 'Paperless matching' }
+    fixture.changeDetectorRef.markForCheck()
+    fixture.detectChanges()
+    const link = fixture.nativeElement.querySelector('a[title="Paperless matching"]')
+    expect(link?.textContent).toBe('Tag2')
+    expect(component.value).toBe(1)
+    expect(component.getSuggestions().map((item) => item.id)).toEqual([2])
+  })
+
   it('should support private items', () => {
     component.value = 3
     component.items = items

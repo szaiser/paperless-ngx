@@ -27,6 +27,7 @@ from paperless_ai.base_model import ClassificationSuggestions
 from paperless_ai.base_model import validate_classification_suggestions
 from paperless_ai.db import db_connection_released
 from paperless_ai.exceptions import StaleSuggestions
+from paperless_ai.exceptions import SuggestionCatalogUnavailable
 from paperless_ai.exceptions import SuggestionProviderError
 from paperless_ai.exceptions import SuggestionProviderUnavailable
 
@@ -116,6 +117,24 @@ def post_provider(payload: dict[str, Any]) -> dict[str, Any]:
                 headers=headers,
             ) as response,
         ):
+            body = bytearray()
+            for chunk in response.iter_bytes(chunk_size=65_536):
+                body.extend(chunk)
+                if len(body) > MAX_RESPONSE_BYTES:
+                    raise SuggestionProviderError(
+                        "Suggestion provider response exceeds 1 MiB",
+                    )
+            if response.status_code == 503:
+                try:
+                    problem = json.loads(body)
+                except (ValueError, UnicodeError):
+                    problem = None
+                if (
+                    isinstance(problem, dict)
+                    and problem.get("code") == "addon_catalog_unavailable"
+                    and isinstance(problem.get("detail"), str)
+                ):
+                    raise SuggestionCatalogUnavailable(problem["detail"][:2000])
             if (
                 response.status_code in {408, 409, 425, 429}
                 or response.status_code >= 500
@@ -127,13 +146,6 @@ def post_provider(payload: dict[str, Any]) -> dict[str, Any]:
                 raise SuggestionProviderError(
                     f"Suggestion provider rejected the request (HTTP {response.status_code})",
                 )
-            body = bytearray()
-            for chunk in response.iter_bytes(chunk_size=65_536):
-                body.extend(chunk)
-                if len(body) > MAX_RESPONSE_BYTES:
-                    raise SuggestionProviderError(
-                        "Suggestion provider response exceeds 1 MiB",
-                    )
             value = json.loads(body)
             if not isinstance(value, dict):
                 raise SuggestionProviderError(
@@ -212,8 +224,24 @@ def get_provider_classification(
         )
     for key in ("tags", "correspondents", "document_types", "storage_paths"):
         allowed = {item["id"] for item in taxonomy[key]}
-        if not set(suggestions[key]["existing_ids"]) <= allowed:
+        requested = set(suggestions[key]["existing_ids"])
+        if not requested <= allowed:
             raise SuggestionProviderError(
                 "Suggestion provider returned an ID outside the permitted taxonomy",
+            )
+        model, permission = TAXONOMY[key]
+        current_names = dict(
+            restrict_queryset_to_visible(
+                model.objects.filter(pk__in=requested), user, permission
+            ).values_list("id", "name"),
+        )
+        expected_names = {
+            item["id"]: item["name"]
+            for item in taxonomy[key]
+            if item["id"] in requested
+        }
+        if current_names != expected_names:
+            raise StaleSuggestions(
+                "Suggestion catalog changed; request suggestions again",
             )
     return suggestions
