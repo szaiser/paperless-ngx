@@ -173,6 +173,7 @@ export class SuggestionsDropdownComponent {
       !suggestions.suggested_document_types?.length &&
       !suggestions.storage_paths?.length &&
       !suggestions.suggested_storage_paths?.length &&
+      !suggestions.custom_fields?.length &&
       !suggestions.dates?.length
     )
   }

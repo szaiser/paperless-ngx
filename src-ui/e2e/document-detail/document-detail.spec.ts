@@ -1,5 +1,81 @@
 import { expect, test } from '@playwright/test'
 
+test('should prefill validity suggestions, preserve corrections and save native date fields', async ({
+  page,
+}) => {
+  await page.route('**/api/ui_settings/', async (route) => {
+    const response = await route.fetch()
+    const settings = await response.json()
+    settings.settings.ai_enabled = true
+    await route.fulfill({ response, json: settings })
+  })
+  await page.goto('/documents/9/details')
+  const headers = { Referer: page.url() }
+  const fieldIds: number[] = []
+  for (const name of ['Validity start test', 'Validity end test']) {
+    const response = await page.request.post(
+      'http://localhost:8001/api/custom_fields/',
+      {
+        headers,
+        data: { name, data_type: 'date' },
+      }
+    )
+    expect(response.ok()).toBe(true)
+    fieldIds.push((await response.json()).id)
+  }
+  await page.route('**/api/documents/9/ai_suggestions/', (route) =>
+    route.fulfill({
+      json: {
+        custom_fields: [
+          { field: fieldIds[0], value: '2025-01-01' },
+          { field: fieldIds[1], value: '2025-03-31' },
+        ],
+      },
+    })
+  )
+  await page.reload()
+  await expect(
+    page.locator('pngx-input-text[formcontrolname="title"] input')
+  ).toHaveValue('test document 9')
+  const suggest = page.getByRole('button', { name: 'Suggest', exact: true })
+  await suggest.click()
+  const start = page
+    .locator('pngx-input-date')
+    .filter({ hasText: 'Validity start test' })
+    .locator('input')
+  const end = page
+    .locator('pngx-input-date')
+    .filter({ hasText: 'Validity end test' })
+    .locator('input')
+  await expect(start).not.toHaveValue('')
+  await expect(end).not.toHaveValue('')
+  const apiUrl = 'http://localhost:8001/api/documents/9/'
+  expect(
+    (await (await page.request.get(apiUrl, { headers })).json()).custom_fields
+  ).toEqual([])
+  // Use the native date input's displayed format rather than assuming a locale.
+  const corrected = (await start.inputValue()).replace('01', '02')
+  await start.fill(corrected)
+  await start.press('Tab')
+  await suggest.click()
+  await expect(start).toHaveValue(corrected)
+  await page.keyboard.press('Escape')
+  const saved = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === '/api/documents/9/' &&
+      response.request().method() === 'PATCH'
+  )
+  await page.getByRole('button', { name: 'Save', exact: true }).last().click()
+  expect((await saved).ok()).toBe(true)
+  const document = await (await page.request.get(apiUrl, { headers })).json()
+  expect(
+    document.custom_fields.find((field) => field.field === fieldIds[0]).value
+  ).not.toBe('2025-01-01')
+  expect(
+    document.custom_fields.find((field) => field.field === fieldIds[1]).value
+  ).toBe('2025-03-31')
+})
+
 for (const width of [1440, 390]) {
   test(`should save a selected title suggestion explicitly at ${width}px`, async ({
     page,

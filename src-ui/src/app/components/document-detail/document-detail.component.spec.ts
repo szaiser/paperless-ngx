@@ -1417,6 +1417,83 @@ describe('DocumentDetailComponent', () => {
     )
   })
 
+  it('should prefill suggested date fields only in the editor and save reviewed values', () => {
+    initNormally()
+    component.customFields.set([
+      ...customFields,
+      { id: 80, name: 'Period start', data_type: CustomFieldDataType.Date },
+      { id: 81, name: 'Period end', data_type: CustomFieldDataType.Date },
+    ])
+    const patchSpy = jest.spyOn(documentService, 'patch')
+    jest.spyOn(documentService, 'getSuggestions').mockReturnValue(
+      of({
+        custom_fields: [
+          { field: 80, value: '2025-01-01' },
+          { field: 81, value: '2025-03-31' },
+        ],
+      })
+    )
+    const existing = component.customFieldFormFields.at(0).get('value')
+    existing.setValue('Unsaved text edit')
+    component.getSuggestions()
+    fixture.detectChanges()
+    expect(patchSpy).not.toHaveBeenCalled()
+    expect(existing.value).toBe('Unsaved text edit')
+    expect(fixture.debugElement.nativeElement.textContent).toContain(
+      'Period start'
+    )
+    const date = component.customFieldFormFields.controls
+      .find((item) => item.get('field').value === 80)
+      .get('value')
+    expect(date.value).toBe('2025-01-01')
+    date.setValue('2025-01-02')
+    date.markAsDirty()
+    component.getSuggestions()
+    expect(date.value).toBe('2025-01-02')
+    expect(
+      component.customFieldFormFields.controls.filter(
+        (item) => item.get('field').value === 80
+      )
+    ).toHaveLength(1)
+    component.save(true)
+    expect(patchSpy.mock.lastCall[0].custom_fields).toEqual(
+      expect.arrayContaining([
+        { field: 80, value: '2025-01-02' },
+        { field: 81, value: '2025-03-31' },
+      ])
+    )
+  })
+
+  it('should preserve saved dates and edits made during a suggestion request', () => {
+    initNormally()
+    const definition = {
+      id: 80,
+      name: 'Period start',
+      data_type: CustomFieldDataType.Date,
+    }
+    component.customFields.set([...customFields, definition])
+    component.addField(definition)
+    const date = component.customFieldFormFields.at(1).get('value')
+    date.setValue('2025-02-01')
+    jest.spyOn(documentService, 'getSuggestions').mockReturnValue(
+      of({
+        custom_fields: [{ field: 80, value: '2025-01-01' }],
+      })
+    )
+    component.getSuggestions()
+    expect(date.value).toBe('2025-02-01')
+    const pending = new Subject<any>()
+    jest.spyOn(documentService, 'getSuggestions').mockReturnValue(pending)
+    component.getSuggestions()
+    date.setValue(null)
+    date.markAsDirty()
+    pending.next({ custom_fields: [{ field: 80, value: '2025-01-01' }] })
+    expect(date.value).toBeNull()
+    component.getSuggestions()
+    pending.next({ custom_fields: [{ field: 80, value: '2025-01-01' }] })
+    expect(date.value).toBeNull()
+  })
+
   it('should correctly determine changed fields', () => {
     initNormally()
     expect(component['getChangedFields']()).toEqual({

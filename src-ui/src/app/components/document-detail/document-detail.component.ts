@@ -1109,6 +1109,9 @@ export class DocumentDetailComponent
     ).filter((s) => !this.fetchedSuggestionSources().includes(s))
     if (!sources.length) return
 
+    const customFieldsBefore = JSON.stringify(
+      this.customFieldFormFields.getRawValue()
+    )
     this.suggestionsLoading.set(true)
     merge(
       ...sources.map((s) =>
@@ -1139,7 +1142,53 @@ export class DocumentDetailComponent
         this.suggestions.set(
           mergeSuggestions(this.suggestions(), response.result)
         )
+        // Never replace edits made while the inference was in flight.
+        if (
+          customFieldsBefore ===
+          JSON.stringify(this.customFieldFormFields.getRawValue())
+        ) {
+          this.prefillSuggestedDateFields(response.result)
+        }
       })
+  }
+
+  private prefillSuggestedDateFields(result: DocumentSuggestions) {
+    if (!this.userCanEdit) return
+    for (const suggestion of result.custom_fields ?? []) {
+      const definition = this.customFields()?.find(
+        (field) => field.id === suggestion.field
+      )
+      if (definition?.data_type !== CustomFieldDataType.Date) continue
+      const control = this.customFieldFormFields.controls.find(
+        (item) => item.get('field').value === suggestion.field
+      )
+      if (control) {
+        if (control.get('value').dirty || control.get('value').value) continue
+        control.get('value').setValue(suggestion.value)
+        control.get('value').markAsDirty()
+      } else {
+        this.document().custom_fields.push({
+          field: suggestion.field,
+          value: suggestion.value,
+          document: this.documentId(),
+          created: new Date(),
+        })
+        // Append only: rebuilding the array would discard other unsaved edits.
+        this.customFieldFormFields.push(
+          new FormGroup({
+            field: new FormControl(suggestion.field),
+            value: new FormControl(suggestion.value),
+          })
+        )
+      }
+      this.customFieldFormFields.markAsDirty()
+    }
+  }
+
+  public customFieldDateSuggestions(fieldId: number): string[] {
+    return (this.suggestions()?.custom_fields ?? [])
+      .filter((suggestion) => suggestion.field === fieldId)
+      .map((suggestion) => suggestion.value)
   }
 
   createTag(newName: string) {

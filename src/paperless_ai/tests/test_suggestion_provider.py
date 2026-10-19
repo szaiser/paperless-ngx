@@ -88,6 +88,75 @@ class TestSuggestionProvider(DirectoriesMixin, TestCase):
     def classify(self) -> ClassificationSuggestions:
         return get_ai_document_classification(self.document, self.user, "de")
 
+    def test_date_fields_are_suggested_without_saving(self):
+        field = CustomField.objects.create(name="Period start", data_type="date")
+        self.post.side_effect = lambda request: {
+            **PROPOSAL,
+            "custom_fields": [{"field": field.pk, "value": "2025-01-01"}],
+        }
+        before = document_snapshot(self.document)
+        response = self.client.get(f"/api/documents/{self.document.pk}/ai_suggestions/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["custom_fields"],
+            [
+                {"field": field.pk, "value": "2025-01-01"},
+            ],
+        )
+        self.assertEqual(
+            self.post.call_args.args[0]["taxonomy"]["custom_fields"],
+            [
+                {"id": field.pk, "name": "Period start", "data_type": "date"},
+            ],
+        )
+        self.assertEqual(document_snapshot(self.document), before)
+        self.assertFalse(
+            CustomFieldInstance.objects.filter(document=self.document).exists(),
+        )
+
+    def test_custom_field_suggestions_require_visible_date_fields_and_valid_values(
+        self,
+    ):
+        field = CustomField.objects.create(name="Period start", data_type="date")
+        text_field = CustomField.objects.create(name="System link", data_type="url")
+        for proposal in (
+            [{"field": field.pk, "value": "2025-02-30"}],
+            [{"field": text_field.pk, "value": "2025-01-01"}],
+            [{"field": field.pk + 1000, "value": "2025-01-01"}],
+            [{"field": field.pk, "value": "2025-01-01"}] * 2,
+        ):
+            with self.subTest(proposal=proposal):
+                self.post.side_effect = lambda request: {
+                    **PROPOSAL,
+                    "custom_fields": proposal,
+                }
+                with self.assertRaises(SuggestionProviderError):
+                    self.classify()
+        self.user.is_superuser = False
+        self.user.save()
+        self.post.side_effect = lambda request: {
+            **PROPOSAL,
+            "custom_fields": [{"field": field.pk, "value": "2025-01-01"}],
+        }
+        with self.assertRaises(SuggestionProviderError):
+            self.classify()
+        self.assertEqual(self.post.call_args.args[0]["taxonomy"]["custom_fields"], [])
+
+    def test_custom_field_catalog_changes_invalidate_suggestions(self):
+        field = CustomField.objects.create(name="Period start", data_type="date")
+
+        def respond(request):
+            field.name = "Changed meaning"
+            field.save()
+            return {
+                **PROPOSAL,
+                "custom_fields": [{"field": field.pk, "value": "2025-01-01"}],
+            }
+
+        self.post.side_effect = respond
+        with self.assertRaises(StaleSuggestions):
+            self.classify()
+
     def test_external_new_identifier_is_never_fuzzily_resolved_to_another_depot(self):
         other = Tag.objects.create(name="Depot 123579983")
         requested = "Depot 123789194"

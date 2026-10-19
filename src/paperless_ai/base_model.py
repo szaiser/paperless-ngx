@@ -223,6 +223,16 @@ class TaxonomyChoiceDict(TypedDict):
 
 
 @with_config(ConfigDict(extra="forbid"))
+class CustomFieldDateSuggestion(TypedDict):
+    field: Annotated[int, Field(gt=0)]
+    value: Annotated[
+        str,
+        Field(pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        AfterValidator(_valid_date),
+    ]
+
+
+@with_config(ConfigDict(extra="forbid"))
 class ClassificationSuggestions(TypedDict):
     """Internal shape used after the flat LLM response is validated."""
 
@@ -231,6 +241,9 @@ class ClassificationSuggestions(TypedDict):
     correspondents: TaxonomyChoiceDict
     document_types: TaxonomyChoiceDict
     storage_paths: TaxonomyChoiceDict
+    custom_fields: NotRequired[
+        Annotated[list[CustomFieldDateSuggestion], Field(max_length=100)]
+    ]
     suggestion_details: NotRequired[
         dict[str, dict[str, Annotated[str, Field(max_length=1000)]]]
     ]

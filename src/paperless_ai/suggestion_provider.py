@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from documents.classifier import load_classifier
 from documents.matching import get_classic_document_suggestions
 from documents.models import Correspondent
+from documents.models import CustomField
 from documents.models import CustomFieldInstance
 from documents.models import Document
 from documents.models import DocumentType
@@ -47,6 +48,17 @@ def fingerprint(value: object) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, cls=DjangoJSONEncoder).encode(),
     ).hexdigest()
+
+
+def date_field_catalog(user: User | None) -> list[dict[str, Any]]:
+    # Custom fields have global permissions, not object ownership/permissions.
+    if user is not None and not user.has_perm("documents.view_customfield"):
+        return []
+    return list(
+        CustomField.objects.filter(data_type=CustomField.FieldDataType.DATE)
+        .order_by("pk")
+        .values("id", "name", "data_type"),
+    )
 
 
 def document_snapshot(document: Document) -> dict[str, Any]:
@@ -196,6 +208,7 @@ def get_provider_classification(
         )
         allowed = {item["id"] for item in taxonomy[key]}
         classic[key] = [pk for pk in classic[key] if pk in allowed]
+    taxonomy["custom_fields"] = date_field_catalog(user)
     context = {
         "document": snapshot,
         "requester_id": user.pk if user else None,
@@ -232,7 +245,9 @@ def get_provider_classification(
         model, permission = TAXONOMY[key]
         current_names = dict(
             restrict_queryset_to_visible(
-                model.objects.filter(pk__in=requested), user, permission
+                model.objects.filter(pk__in=requested),
+                user,
+                permission,
             ).values_list("id", "name"),
         )
         expected_names = {
@@ -244,4 +259,12 @@ def get_provider_classification(
             raise StaleSuggestions(
                 "Suggestion catalog changed; request suggestions again",
             )
+    field_ids = [item["field"] for item in suggestions.get("custom_fields", [])]
+    allowed_fields = {item["id"] for item in taxonomy["custom_fields"]}
+    if len(field_ids) != len(set(field_ids)) or not set(field_ids) <= allowed_fields:
+        raise SuggestionProviderError("Invalid or unavailable custom-field suggestion")
+    if field_ids and date_field_catalog(user) != taxonomy["custom_fields"]:
+        raise StaleSuggestions(
+            "Custom-field catalog changed; request suggestions again",
+        )
     return suggestions

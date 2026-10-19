@@ -208,6 +208,7 @@
                     }
                     @case (CustomFieldDataType.Date) {
                       <pngx-input-date formControlName="value"
+                      [suggestions]="customFieldDateSuggestions(fieldInstance.field)"
                       [title]="getCustomFieldFromInstance(fieldInstance)?.name"
                       [removable]="userCanEdit"
                       (removed)="removeField(fieldInstance)"

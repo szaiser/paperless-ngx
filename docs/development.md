@@ -398,6 +398,10 @@ Paperless POSTs the following JSON fields to the configured endpoint:
 | `taxonomy`            | Visible `{id, name}` objects for tags, correspondents, document types and storage paths.         |
 | `classic_suggestions` | Native matching candidates as IDs and parsed dates as ISO strings.                               |
 
+`taxonomy.custom_fields` additionally lists visible native **date** definitions
+as `{id, name, data_type}`. This is independent of whether the document already
+has a value for the field. Custom fields use Paperless's global view permission.
+
 `document.id` identifies the metadata document. `document.content_version`
 identifies the source of `document.content`: the latest version for a root
 document, or the explicitly addressed version document. It includes `id`,
@@ -428,6 +432,16 @@ IDs and eight new names; at most three valid ISO dates are accepted. Responses
 are capped at 1 MiB. Unknown fields and incorrect types are rejected.
 To select existing taxonomy only, return empty
 `new_names`. Return empty choices for fields that should remain unchanged.
+
+An optional `custom_fields` response contains up to 100 unique
+`{"field": <existing date field ID>, "value": "YYYY-MM-DD"}` entries. Only valid
+dates and IDs from `taxonomy.custom_fields` are accepted; a changed definition
+invalidates the response. Omit unknown dates rather than returning null entries.
+The editor prefills empty date fields without saving and shows the proposals in
+the native date controls. Existing values, dirty controls and edits during the
+request are preserved. This is an editor-only extension: the automatic workflow
+action does not apply custom-field proposals. Providers own field semantics;
+Paperless neither creates definitions nor contains domain-specific field names.
 
 ### Freshness and failures
 

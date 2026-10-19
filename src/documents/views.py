@@ -1824,6 +1824,8 @@ class DocumentViewSet(
 
         if not resp_data["suggestion_details"]:
             resp_data.pop("suggestion_details")
+        if llm_suggestions.get("custom_fields"):
+            resp_data["custom_fields"] = llm_suggestions["custom_fields"]
 
         return Response(resp_data)
 

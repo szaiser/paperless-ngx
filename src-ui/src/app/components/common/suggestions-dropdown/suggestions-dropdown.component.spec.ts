@@ -22,6 +22,14 @@ describe('SuggestionsDropdownComponent', () => {
     fixture.detectChanges()
   })
 
+  it('should recognize custom-field date suggestions', () => {
+    fixture.componentRef.setInput('suggestions', {
+      custom_fields: [{ field: 80, value: '2025-01-01' }],
+    })
+    fixture.detectChanges()
+    expect(component.noSuggestions).toBeFalsy()
+  })
+
   it('should exclude suggested storage path names from totalSuggestions', () => {
     fixture.componentRef.setInput('suggestions', {
       suggested_correspondents: ['John Doe'],
