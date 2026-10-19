@@ -235,6 +235,9 @@ test('should show a list of notes', async ({ page }) => {
 
 test('should support quick filters', async ({ page }) => {
   await page.goto('/documents/1/details')
+  await expect(page.locator('pngx-input-tags')).toContainText(
+    'Another Sample Tag'
+  )
   await page
     .getByRole('button', { name: 'Filter documents with these Tags' })
     .click()
