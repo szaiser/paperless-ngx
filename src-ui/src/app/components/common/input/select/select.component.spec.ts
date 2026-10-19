@@ -65,7 +65,9 @@ describe('SelectComponent', () => {
     component.suggestionDetails = { 2: 'Paperless matching' }
     fixture.changeDetectorRef.markForCheck()
     fixture.detectChanges()
-    const link = fixture.nativeElement.querySelector('a[title="Paperless matching"]')
+    const link = fixture.nativeElement.querySelector(
+      'a[title="Paperless matching"]'
+    )
     expect(link?.textContent).toBe('Tag2')
     expect(component.value).toBe(1)
     expect(component.getSuggestions().map((item) => item.id)).toEqual([2])

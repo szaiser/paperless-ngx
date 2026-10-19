@@ -74,7 +74,9 @@ def _match_by_name(
         pk__in=permitted_object_ids(user, model, perm),
     )
     return _match_names_to_queryset(
-        names, queryset, allow_fuzzy=not bool(settings.AI_SUGGESTIONS_ENDPOINT),
+        names,
+        queryset,
+        allow_fuzzy=not bool(settings.AI_SUGGESTIONS_ENDPOINT),
     )
 
 
