@@ -22,7 +22,6 @@ from documents.models import MatchingModel
 from documents.models import StoragePath
 from documents.models import Tag
 from documents.models import WorkflowAction
-from documents.tests.utils import DirectoriesMixin
 from documents.workflows.ai import apply_ai_suggestions_to_document
 from paperless_ai.ai_classifier import get_ai_document_classification
 from paperless_ai.base_model import ClassificationSuggestions
@@ -32,6 +31,7 @@ from paperless_ai.exceptions import SuggestionProviderError
 from paperless_ai.exceptions import SuggestionProviderUnavailable
 from paperless_ai.suggestion_provider import document_snapshot
 from paperless_ai.suggestion_provider import post_provider
+from paperless_testing.dirs import DirectoriesMixin
 
 PROPOSAL = {
     "title": "Synthetic proposal",

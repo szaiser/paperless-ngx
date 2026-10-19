@@ -137,7 +137,8 @@ export class SuggestionsDropdownComponent {
     return (
       this.reusableSuggestions +
       this.unappliedTitleSuggestions +
-      this.unappliedDateSuggestions
+      this.unappliedDateSuggestions +
+      (this.suggestions()?.custom_fields?.length ?? 0)
     )
   }
 

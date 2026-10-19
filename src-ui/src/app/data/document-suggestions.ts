@@ -25,6 +25,10 @@ export function mergeSuggestions(
   b: DocumentSuggestions
 ): DocumentSuggestions {
   if (!a) return b
+  const suggestionDetails = { ...a.suggestion_details }
+  for (const [kind, details] of Object.entries(b.suggestion_details ?? {})) {
+    suggestionDetails[kind] = { ...suggestionDetails[kind], ...details }
+  }
   return {
     title: a.title || b.title,
     tags: union(a.tags, b.tags),
@@ -45,5 +49,15 @@ export function mergeSuggestions(
       b.suggested_storage_paths
     ),
     dates: union(a.dates, b.dates),
+    suggestion_details: suggestionDetails,
+    custom_fields: [
+      ...(a.custom_fields ?? []),
+      ...(b.custom_fields ?? []),
+    ].filter(
+      (item, index, items) =>
+        items.findIndex(
+          (other) => other.field === item.field && other.value === item.value
+        ) === index
+    ),
   }
 }

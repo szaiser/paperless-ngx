@@ -28,6 +28,7 @@ describe('SuggestionsDropdownComponent', () => {
     })
     fixture.detectChanges()
     expect(component.noSuggestions).toBeFalsy()
+    expect(component.fieldSuggestions).toBe(1)
   })
 
   it('should exclude suggested storage path names from totalSuggestions', () => {

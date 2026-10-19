@@ -1418,6 +1418,7 @@ describe('DocumentDetailComponent', () => {
   })
 
   it('should prefill suggested date fields only in the editor and save reviewed values', () => {
+    settingsService.set(SETTINGS_KEYS.DOCUMENT_EDITING_AUTO_SUGGEST, false)
     initNormally()
     component.customFields.set([
       ...customFields,
@@ -1435,6 +1436,7 @@ describe('DocumentDetailComponent', () => {
     )
     const existing = component.customFieldFormFields.at(0).get('value')
     existing.setValue('Unsaved text edit')
+    component.fetchedSuggestionSources.set([])
     component.getSuggestions()
     fixture.detectChanges()
     expect(patchSpy).not.toHaveBeenCalled()
@@ -1448,6 +1450,7 @@ describe('DocumentDetailComponent', () => {
     expect(date.value).toBe('2025-01-01')
     date.setValue('2025-01-02')
     date.markAsDirty()
+    component.fetchedSuggestionSources.set([])
     component.getSuggestions()
     expect(date.value).toBe('2025-01-02')
     expect(
@@ -1465,6 +1468,7 @@ describe('DocumentDetailComponent', () => {
   })
 
   it('should preserve saved dates and edits made during a suggestion request', () => {
+    settingsService.set(SETTINGS_KEYS.DOCUMENT_EDITING_AUTO_SUGGEST, false)
     initNormally()
     const definition = {
       id: 80,
@@ -1480,15 +1484,18 @@ describe('DocumentDetailComponent', () => {
         custom_fields: [{ field: 80, value: '2025-01-01' }],
       })
     )
+    component.fetchedSuggestionSources.set([])
     component.getSuggestions()
     expect(date.value).toBe('2025-02-01')
     const pending = new Subject<any>()
     jest.spyOn(documentService, 'getSuggestions').mockReturnValue(pending)
+    component.fetchedSuggestionSources.set([])
     component.getSuggestions()
     date.setValue(null)
     date.markAsDirty()
     pending.next({ custom_fields: [{ field: 80, value: '2025-01-01' }] })
     expect(date.value).toBeNull()
+    component.fetchedSuggestionSources.set([])
     component.getSuggestions()
     pending.next({ custom_fields: [{ field: 80, value: '2025-01-01' }] })
     expect(date.value).toBeNull()
@@ -1701,6 +1708,9 @@ describe('DocumentDetailComponent', () => {
         of({ title: 'AI title', tags: [42, 43], suggested_tags: ['New'] })
       )
     initNormally()
+    expect(suggestionsSpy).not.toHaveBeenCalled()
+    expect(aiSuggestionsSpy).not.toHaveBeenCalled()
+    component.getSuggestions()
     expect(suggestionsSpy).toHaveBeenCalled()
     expect(aiSuggestionsSpy).toHaveBeenCalled()
     expect(component.suggestions().title).toEqual('AI title')
@@ -1783,6 +1793,7 @@ describe('DocumentDetailComponent', () => {
       .spyOn(documentService, 'getAiSuggestions')
       .mockReturnValue(throwError(() => new Error('failed')))
     initNormally()
+    component.getSuggestions()
     expect(errorSpy).toHaveBeenCalled()
     expect(component.suggestions().tags).toEqual([42])
     expect(component.fetchedSuggestionSources()).toEqual([SuggestionSource.ML])
